@@ -347,6 +347,7 @@ class VoxelWorld:
             "quads": self._cached_quads,
             "normals": self._cached_normals,
             "colors": self._cached_colors,
+            "uv_scales": np.ones((len(self._cached_quads), 2), dtype=np.float32),
             "textures": self._cached_textures,
             "tex_ids": self._cached_tex_ids,
             "alphas": self._cached_alphas,

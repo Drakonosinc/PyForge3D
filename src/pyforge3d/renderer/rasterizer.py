@@ -171,6 +171,7 @@ class SoftwareTexturedRasterizer:
         fog_color: np.ndarray | None = None,
         alpha: int = 255,
         canonical_uv: bool = False,
+        uv_scale: tuple[float, float] = (1.0, 1.0),
     ) -> None:
         """
         Single-pass exact perspective-correct rasterizer for ANY convex planar 3D polygon (triangle, quad, or clipped N-gon).
@@ -350,10 +351,15 @@ class SoftwareTexturedRasterizer:
         iz_v = inv_z[vy, vx]
         inv_iz = 1.0 / iz_v
 
+        tw = texture.width
+        th = texture.height
+        tu, tv = float(uv_scale[0]), float(uv_scale[1])
         if canonical_uv and i1 == 1 and i2 == 2:
-            # Canonical quad UV: uv0=(0,1), uv1=(0,0), uv2=(1,0) -> single-term u/z and v/z!
-            u_over_z = (a2 * iz2) * px + (b2 * iz2) * py + (c2 * iz2)
-            v_over_z = (a0 * iz0) * px + (b0 * iz0) * py + (c0 * iz0)
+            # Canonical quad UV scaled by (tu, tv) for greedy-meshed texture tiling
+            u_over_z = (a2 * iz2 * tu) * px + (b2 * iz2 * tu) * py + (c2 * iz2 * tu)
+            v_over_z = (a0 * iz0 * tv) * px + (b0 * iz0 * tv) * py + (c0 * iz0 * tv)
+            max_tx = max(tw - 1, int(round(tw * tu)) - 1)
+            max_ty = max(th - 1, int(round(th * tv)) - 1)
         else:
             assert uvs is not None
             u0, v0 = uvs[0]
@@ -367,15 +373,21 @@ class SoftwareTexturedRasterizer:
             v_over_z = (a0 * v0z + a1 * v1z + a2 * v2z) * px + (b0 * v0z + b1 * v1z + b2 * v2z) * py + (
                 c0 * v0z + c1 * v1z + c2 * v2z
             )
+            u_hi = max(u[0] for u in uvs)
+            v_hi = max(u[1] for u in uvs)
+            max_tx = max(tw - 1, int(tw * max(1.0, float(np.ceil(u_hi)))) - 1)
+            max_ty = max(th - 1, int(th * max(1.0, float(np.ceil(v_hi)))) - 1)
 
-        tw = texture.width
-        th = texture.height
         tx = (u_over_z * (inv_iz * tw)).astype(np.int32)
         ty = (v_over_z * (inv_iz * th)).astype(np.int32)
         np.maximum(tx, 0, out=tx)
-        np.minimum(tx, tw - 1, out=tx)
+        np.minimum(tx, max_tx, out=tx)
         np.maximum(ty, 0, out=ty)
-        np.minimum(ty, th - 1, out=ty)
+        np.minimum(ty, max_ty, out=ty)
+        if max_tx >= tw:
+            tx %= tw
+        if max_ty >= th:
+            ty %= th
 
         shaded_rgb = self._get_shaded_texture(texture, shade, fog_factor, fog_color)
 

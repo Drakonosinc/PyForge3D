@@ -1,27 +1,30 @@
-# 🧊 PyForge3D — Vectorized 3D Software Renderer, Voxel Engine & 3D Physics for Pygame
+# 🧊 PyForge3D — High-Performance 3D Software Renderer, Voxel Chunk Engine & 3D Physics for Pygame
 
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-4B32C3?logo=read-the-docs&logoColor=white)](https://deepwiki.com/Drakonosinc/PyForge3D)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Pygame](https://img.shields.io/badge/Pygame--CE-3D_Software_Engine-00B4AB)
+![Version](https://img.shields.io/badge/Version-1.4.0-22C55E)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**PyForge3D** (`pyforge3d`) is a high-performance, zero-OpenGL **3D Software Renderer, Voxel World Engine (Minecraft-style), Procedural Mesh Library, 3D DDA Raycaster, and 3D AABB Physics engine** built purely on top of `pygame` / `pygame-ce` and `numpy`.
+**PyForge3D** (`pyforge3d`) is a 100% game-agnostic, zero-OpenGL **3D Software Renderer, Textured Z-Buffer Engine, Infinite Chunked Voxel Engine with 2D Greedy Meshing, Procedural Perlin Noise Library, Atmospheric Sky Dome, 3D DDA Raycaster, and 3D AABB Physics engine** built on top of `pygame` / `pygame-ce` and `numpy`.
 
-Because it renders directly onto standard `pygame.Surface` canvases using vectorized NumPy matrix transformations, back-face culling, neighbor voxel face culling, and near-plane clipping, it integrates seamlessly with **`PyForgeUI`**, **`PyForgeFX`**, and **`PyForgeAI`**.
+It features a **Dual-Backend Scanline Z-Buffer Pipeline** (a zero-dependency ISO C99 native rasterizer loaded via `ctypes` writing zero-copy directly into SDL's 32-bit surface buffer, plus a 100% portable pure-NumPy fallback with pixel parity) — delivering **90–140+ FPS** at HD/Native resolutions with perspective-correct texture mapping, translucent Water/Glass blending, Ambient Occlusion, and long-range chunked worlds.
 
 ---
 
 ## 🚀 Key Features
 
-| Module | Classes | Description |
+| Module | Classes & Functions | Description |
 | :--- | :--- | :--- |
-| **`pyforge3d.math`** | `Matrix4`, `Transform3D`, `clip_polygon_near_plane` | Vectorized 4x4 perspective, view, translation, Euler rotation, and near-plane polygon clipping in NumPy. |
-| **`pyforge3d.camera`** | `Camera3D`, `FirstPersonController`, `OrbitCamera` | Perspective 3D camera with Yaw/Pitch/Roll, Frustum FOV, plug-and-play FPS/Minecraft controller, and orbital camera. |
-| **`pyforge3d.meshes`** | `Mesh3D`, `Primitives`, `OBJLoader` | Procedural 3D primitives (`Cube`, `Pyramid`, `Sphere`, `Cylinder`, `Plane3D`) and Wavefront `.obj` 3D mesh loader. |
-| **`pyforge3d.voxels`** | `VoxelWorld`, `VoxelHit` | Minecraft-style block world with automatic **Neighbor Face Culling** (~85% polygon reduction) and **3D DDA Voxel Raycasting** for breaking/placing blocks. |
-| **`pyforge3d.physics`** | `AABB3D`, `VoxelPhysicsBody` | 3D Axis-Aligned Bounding Box collision detection, gravity, jumping, and sliding against `VoxelWorld` blocks. |
-| **`pyforge3d.lighting`** | `DirectionalLight`, `PointLight`, `Fog3D` | Per-face flat directional/point shading, ambient illumination, and distance-based atmospheric fog interpolation. |
-| **`pyforge3d.renderer`** | `Renderer3D`, `Scene3D` | Vectorized back-face culling, Painter's Algorithm depth sorting, solid/wireframe/outlined rendering, and 3D voxel cursor highlighting. |
+| **`pyforge3d.renderer`** | `Renderer3D`, `Scene3D`, `SoftwareTexturedRasterizer`, `HAS_NATIVE_RASTERIZER`, `build_native_rasterizer` | Dual-backend (C99 native + Pure-NumPy) per-pixel `1/Z` Z-Buffer rasterizer, perspective-correct tiled UV mapping, translucent alpha blending, `block_overlays` voxel decals, and Painter solid fallback. |
+| **`pyforge3d.voxels`** | `ChunkedVoxelWorld`, `Chunk3D`, `VoxelWorld`, `VoxelMaterial`, `VoxelHit` | Infinite streamable 3D chunk worlds with **2D Greedy Meshing** (4×–6× fewer polygons), dense-halo neighbor face culling, per-face **Ambient Occlusion**, per-chunk 3D frustum culling, **3D DDA Raycasting**, and compact JSON override serialization (`export_overrides`/`import_overrides`). |
+| **`pyforge3d.textures`** | `Texture2D`, `TextureAtlas` | RGB/RGBA 2D texture wrapper (from NumPy, PNG, or `pygame.Surface`) with cutout/alpha detection and contiguous atlas packing for fast indexed rendering. |
+| **`pyforge3d.procedural`** | `PerlinNoise2D`, `FractalNoise2D`, `hash_2d` | Pure-NumPy vectorized 2D Perlin noise, multi-octave fBm fractal noise, and deterministic 2D coordinate hashing. |
+| **`pyforge3d.lighting`** | `SkyDome3D`, `DirectionalLight`, `PointLight`, `Fog3D` | Continuous day/night sky dome (orbiting Sun/Moon, twinkling stars, infinite 3D clouds), directional/point lighting, and atmospheric distance fog. |
+| **`pyforge3d.meshes`** | `Mesh3D`, `Primitives`, `OBJLoader` | Solid & textured 3D meshes (`Primitives.cube`, `Primitives.textured_cube`, `pyramid`, `sphere`, `cylinder`, `plane`) and Wavefront `.obj` parser. |
+| **`pyforge3d.camera`** | `Camera3D`, `FirstPersonController`, `OrbitCamera` | Perspective 3D camera with Yaw/Pitch/Roll, configurable FOV/near/far planes, mouse-captured FPS controller, and orbital camera. |
+| **`pyforge3d.physics`** | `AABB3D`, `VoxelPhysicsBody` | 3D Axis-Aligned Bounding Box collisions, gravity, jumping, and non-solid liquid traversal against `VoxelWorld` and `ChunkedVoxelWorld`. |
+| **`pyforge3d.math`** | `Matrix4`, `Transform3D`, `clip_polygon_near_plane`, `compute_face_normals` | Vectorized 3D transforms, Sutherland-Hodgman 3D & UV near-plane clipping, and fast face normal computation. |
 
 ---
 
@@ -31,43 +34,64 @@ Because it renders directly onto standard `pygame.Surface` canvases using vector
 pip install pyforge3d
 ```
 
+Or install in editable mode from source:
+
+```bash
+git clone https://github.com/Drakonosinc/PyForge3D.git
+cd PyForge3D
+pip install -e .
+```
+
+*(If `gcc`/`clang` is available on PATH, the zero-dependency C99 native rasterizer builds automatically on first import for 10×+ higher FPS; otherwise the pure-NumPy backend runs seamlessly with zero setup.)*
+
 ---
 
-## ⚡ Quickstart Example (Minecraft-style 3D Voxel World in Pygame)
+## ⚡ Quickstart Example (Textured Infinite Chunk World + SkyDome3D)
 
 ```python
+import numpy as np
 import pygame
 from pyforge3d import (
     Camera3D,
-    DirectionalLight,
+    ChunkedVoxelWorld,
     FirstPersonController,
-    Fog3D,
-    Primitives,
+    FractalNoise2D,
     Renderer3D,
-    Scene3D,
-    VoxelWorld,
+    SkyDome3D,
+    Texture2D,
+    VoxelMaterial,
 )
 
 pygame.init()
 screen = pygame.display.set_mode((960, 540))
 clock = pygame.time.Clock()
 
-camera = Camera3D(position=(4.0, 5.0, -6.0), yaw=0.0, pitch=-0.35, fov=70.0)
-controller = FirstPersonController(camera, move_speed=6.0)
-renderer = Renderer3D(
-    width=960,
-    height=540,
-    light=DirectionalLight(direction=(-0.5, -1.0, -0.4), ambient=0.35),
-    fog=Fog3D(color=(14, 20, 36), near=12.0, far=36.0),
-)
+# Create a simple procedural 16x16 texture (100% game-defined!)
+rng = np.random.default_rng(7)
+top_tex = Texture2D(rng.integers(60, 175, (16, 16, 3), dtype=np.uint8))
+side_tex = Texture2D(rng.integers(85, 135, (16, 16, 3), dtype=np.uint8))
+terrain_mat = VoxelMaterial(top_texture=top_tex, side_texture=side_tex, bottom_texture=side_tex)
 
-world = VoxelWorld()
-world.generate_flat_terrain(width=10, depth=10, ground_color=(56, 189, 248))
-world.set_block(4, 1, 4, color=(255, 199, 51))
+noise = FractalNoise2D(seed=42, octaves=4, scale=24.0)
 
-scene = Scene3D()
-floating_cube = Primitives.cube(size=1.0, color=(168, 85, 247), position=(4.5, 3.0, 4.5))
-scene.add_mesh(floating_cube)
+def generate_chunk(cx: int, cz: int, cs: int, w: ChunkedVoxelWorld) -> None:
+    xs = np.arange(cx * cs, (cx + 1) * cs, dtype=np.float32)
+    zs = np.arange(cz * cs, (cz + 1) * cs, dtype=np.float32)
+    gx, gz = np.meshgrid(xs, zs, indexing="ij")
+    heights = np.floor(noise.sample(gx, gz, normalized=True) * 8.0).astype(int)
+    for ix in range(cs):
+        for iz in range(cs):
+            for y in range(int(heights[ix, iz]) + 1):
+                w.set_block_raw(int(xs[ix]), y, int(zs[iz]), terrain_mat)
+
+world = ChunkedVoxelWorld(chunk_size=8, generator_fn=generate_chunk, greedy_meshing=True)
+world.update_chunks_around(0, 0, load_radius=5, unload_radius=7, max_new_per_call=120)
+
+camera = Camera3D(position=(4.0, 9.5, 4.0), fov=75.0, near=0.06, far=64.0)
+controller = FirstPersonController(camera, move_speed=8.0)
+sky = SkyDome3D(time_of_day=0.25)
+renderer = Renderer3D(960, 540, textured=True, render_scale=0.72)
+sky.sync_lighting(renderer.light, renderer.fog)
 
 running = True
 while running:
@@ -75,10 +99,12 @@ while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
+        controller.handle_event(event)
 
-    floating_cube.transform.rotation_y += 1.2 * dt
-    screen.fill((14, 20, 36))
-    renderer.render_scene(screen, camera, scene=scene, voxel_world=world)
+    sky.update(dt)
+    sky.sync_lighting(renderer.light, renderer.fog)
+    world.update_chunks_around(camera.x, camera.z, load_radius=5, unload_radius=7, max_new_per_call=2)
+    renderer.render_scene(screen, camera, voxel_world=world, sky_dome=sky)
     pygame.display.flip()
 
 pygame.quit()

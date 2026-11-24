@@ -209,10 +209,11 @@ class Renderer3D:
         half_w: float,
         half_h: float,
         proj_scale: float,
+        include_textures: bool = True,
     ) -> dict:
         if hasattr(voxel_world, "get_visible_render_data"):
             return voxel_world.get_visible_render_data(
-                cam_pos, view_mat, near_z, far_z, half_w, half_h, proj_scale
+                cam_pos, view_mat, near_z, far_z, half_w, half_h, proj_scale, include_textures=include_textures
             )
         return voxel_world.get_culled_render_data()
 
@@ -276,7 +277,7 @@ class Renderer3D:
         total_faces = 0
 
         # Prepare voxel batches entirely in vectorized NumPy (zero Python per-quad loops!)
-        fast_sx = fast_sy = fast_iz = None
+        fast_sx = fast_sy = fast_iz = fast_uvs = None
         fast_tids = fast_shades = fast_fog = fast_solid = fast_alphas = None
         op_order = tr_order = None
         straddle_op: list[tuple] = []
@@ -284,7 +285,7 @@ class Renderer3D:
 
         if voxel_world is not None:
             data = self._fetch_voxel_data(
-                voxel_world, cam_pos, view_mat, near_z, far_z, half_w, half_h, proj_scale
+                voxel_world, cam_pos, view_mat, near_z, far_z, half_w, half_h, proj_scale, include_textures=False
             )
             atlas = data.get("atlas", self._empty_atlas)
             atlas.ensure_packed()
@@ -330,6 +331,7 @@ class Renderer3D:
                         ao_vis = data["ao"][orig_idx]
                         tids_vis = data["tex_ids"][orig_idx]
                         tr_vis = data["is_translucent"][orig_idx]
+                        uvs_vis = data["uv_scales"][orig_idx] if "uv_scales" in data else np.ones((len(orig_idx), 2), dtype=np.float32)
 
                         cam_centers = q_cam.mean(axis=1)
                         depths = np.sqrt(
@@ -377,6 +379,7 @@ class Renderer3D:
                                 fast_sx = np.ascontiguousarray(sx_fast[on_scr], dtype=np.float32)
                                 fast_sy = np.ascontiguousarray(sy_fast[on_scr], dtype=np.float32)
                                 fast_iz = np.ascontiguousarray(inv_z_fast[on_scr], dtype=np.float32)
+                                fast_uvs = np.ascontiguousarray(uvs_vis[sel], dtype=np.float32)
                                 fast_tids = np.ascontiguousarray(tids_lod[sel], dtype=np.int32)
                                 fast_shades = np.ascontiguousarray(shades[sel], dtype=np.float32)
                                 fast_fog = np.ascontiguousarray(fog_factors[sel], dtype=np.float32)
@@ -393,11 +396,12 @@ class Renderer3D:
                                     tr_order = np.ascontiguousarray(tr_idx[np.argsort(-fast_depths[tr_idx])], dtype=np.int32)
                                 total_faces += len(on_scr)
 
-                        # Near-plane clipped straddling quads (typically 0-12 per frame)
+                        # Near-plane clipped straddling quads (scales tiled UVs for greedy quads!)
                         straddle_sub = np.flatnonzero(~all_in_front)
                         for local_i in straddle_sub:
+                            scaled_uv = CANONICAL_QUAD_UV * uvs_vis[local_i][None, :]
                             clipped_p, clipped_uv = clip_textured_polygon_near_plane(
-                                q_cam[local_i], CANONICAL_QUAD_UV, near_z
+                                q_cam[local_i], scaled_uv, near_z
                             )
                             nv = len(clipped_p)
                             if nv < 3 or nv > 8:
@@ -598,6 +602,7 @@ class Renderer3D:
                 NATIVE_LIB.pf3d_rasterize_quads(
                     fb_ptr, pitch, z_ptr, rw, rh, r_off, g_off, b_off,
                     fast_sx.ctypes.data, fast_sy.ctypes.data, fast_iz.ctypes.data,
+                    fast_uvs.ctypes.data,
                     fast_tids.ctypes.data, fast_shades.ctypes.data, fast_fog.ctypes.data,
                     fog_r, fog_g, fog_b,
                     fast_solid.ctypes.data, fast_alphas.ctypes.data,
@@ -635,6 +640,7 @@ class Renderer3D:
                 NATIVE_LIB.pf3d_rasterize_quads(
                     fb_ptr, pitch, z_ptr, rw, rh, r_off, g_off, b_off,
                     fast_sx.ctypes.data, fast_sy.ctypes.data, fast_iz.ctypes.data,
+                    fast_uvs.ctypes.data,
                     fast_tids.ctypes.data, fast_shades.ctypes.data, fast_fog.ctypes.data,
                     fog_r, fog_g, fog_b,
                     fast_solid.ctypes.data, fast_alphas.ctypes.data,
@@ -805,12 +811,14 @@ class Renderer3D:
                             )
                             uv_list = [(0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]
 
+                            uv_scales_w = data.get("uv_scales")
                             for k in valid_fast:
                                 local_i = fast_sub[k]
                                 orig_i = orig_indices[local_i]
                                 d_val = float(depths[local_i])
                                 tex = textures_w[orig_i] if d_val <= lod_dist else None
                                 alp = int(a_vis[local_i])
+                                uvs_pair = (float(uv_scales_w[orig_i, 0]), float(uv_scales_w[orig_i, 1])) if uv_scales_w is not None else (1.0, 1.0)
                                 pts_invz = [
                                     (float(sx_fast[k, 0]), float(sy_fast[k, 0]), float(inv_z_fast[k, 0])),
                                     (float(sx_fast[k, 1]), float(sy_fast[k, 1]), float(inv_z_fast[k, 1])),
@@ -824,7 +832,7 @@ class Renderer3D:
                                 )
                                 item = (
                                     d_val, pts_invz, uv_list if tex is not None else None,
-                                    tex, rgb, float(shades[local_i]), float(fog_factors[local_i]), alp, tex is not None,
+                                    tex, rgb, float(shades[local_i]), float(fog_factors[local_i]), alp, tex is not None, uvs_pair,
                                 )
                                 if alp < 255 or (tex is not None and tex.has_cutout):
                                     translucent_items.append(item)
@@ -832,9 +840,12 @@ class Renderer3D:
                                     opaque_items.append(item)
 
                         straddle_sub = np.flatnonzero(~all_in_front)
+                        uv_scales_w = data.get("uv_scales")
                         for local_i in straddle_sub:
+                            orig_i = orig_indices[local_i]
+                            scaled_uv = CANONICAL_QUAD_UV * uv_scales_w[orig_i][None, :] if uv_scales_w is not None else CANONICAL_QUAD_UV
                             clipped_p, clipped_uv = clip_textured_polygon_near_plane(
-                                q_cam[local_i], CANONICAL_QUAD_UV, near_z
+                                q_cam[local_i], scaled_uv, near_z
                             )
                             if len(clipped_p) < 3:
                                 continue
@@ -843,7 +854,6 @@ class Renderer3D:
                             ys = [p[1] for p in pts_invz]
                             if max(xs) < 0.0 or min(xs) >= rw or max(ys) < 0.0 or min(ys) >= rh:
                                 continue
-                            orig_i = orig_indices[local_i]
                             d_val = float(depths[local_i])
                             tex = textures_w[orig_i] if d_val <= lod_dist else None
                             alp = int(a_vis[local_i])
@@ -855,7 +865,7 @@ class Renderer3D:
                             )
                             item = (
                                 d_val, pts_invz, uv_l, tex, rgb,
-                                float(shades[local_i]), float(fog_factors[local_i]), alp, False,
+                                float(shades[local_i]), float(fog_factors[local_i]), alp, False, (1.0, 1.0),
                             )
                             if alp < 255 or (tex is not None and tex.has_cutout):
                                 translucent_items.append(item)
@@ -912,13 +922,13 @@ class Renderer3D:
                     rgb_tuple = (int(shaded[0]), int(shaded[1]), int(shaded[2]))
                     if f_tex is not None and f_uv is not None:
                         uv_l = [(float(u[0]), float(u[1])) for u in f_uv]
-                        item_m = (d_val, pts_invz, uv_l, f_tex, rgb_tuple, max(0.25, min(1.25, intensity * 1.05)), fog_f_m, mesh_alp, False)
+                        item_m = (d_val, pts_invz, uv_l, f_tex, rgb_tuple, max(0.25, min(1.25, intensity * 1.05)), fog_f_m, mesh_alp, False, (1.0, 1.0))
                         if mesh_alp < 255 or f_tex.has_cutout:
                             translucent_items.append(item_m)
                         else:
                             opaque_items.append(item_m)
                     else:
-                        item_m = (d_val, pts_invz, None, None, rgb_tuple, 1.0, 0.0, mesh_alp, False)
+                        item_m = (d_val, pts_invz, None, None, rgb_tuple, 1.0, 0.0, mesh_alp, False, (1.0, 1.0))
                         if mesh_alp < 255:
                             translucent_items.append(item_m)
                         else:
@@ -952,21 +962,21 @@ class Renderer3D:
                     if max(xs) < 0.0 or min(xs) >= rw or max(ys) < 0.0 or min(ys) >= rh:
                         continue
                     uv_l = [(float(u[0]), float(u[1])) for u in ov_uv]
-                    translucent_items.append((d_val, pts_invz, uv_l, ov_tex, (255, 255, 255), 1.0, 0.0, 255, False))
+                    translucent_items.append((d_val, pts_invz, uv_l, ov_tex, (255, 255, 255), 1.0, 0.0, 255, False, (1.0, 1.0)))
 
         draw_poly = rast.draw_planar_polygon
         opaque_items.sort(key=lambda it: it[0])
-        for _, pts_invz, uvs, tex, rgb, shade, fog_f, alp, is_canon in opaque_items:
+        for _, pts_invz, uvs, tex, rgb, shade, fog_f, alp, is_canon, uvs_pair in opaque_items:
             draw_poly(
                 pts_invz, uvs=uvs, texture=tex, solid_color=rgb,
-                shade=shade, fog_factor=fog_f, fog_color=fog_color, alpha=255, canonical_uv=is_canon,
+                shade=shade, fog_factor=fog_f, fog_color=fog_color, alpha=255, canonical_uv=is_canon, uv_scale=uvs_pair,
             )
 
         translucent_items.sort(key=lambda it: it[0], reverse=True)
-        for _, pts_invz, uvs, tex, rgb, shade, fog_f, alp, is_canon in translucent_items:
+        for _, pts_invz, uvs, tex, rgb, shade, fog_f, alp, is_canon, uvs_pair in translucent_items:
             draw_poly(
                 pts_invz, uvs=uvs, texture=tex, solid_color=rgb,
-                shade=shade, fog_factor=fog_f, fog_color=fog_color, alpha=alp, canonical_uv=is_canon,
+                shade=shade, fog_factor=fog_f, fog_color=fog_color, alpha=alp, canonical_uv=is_canon, uv_scale=uvs_pair,
             )
 
         rast.blit_to_screen(screen)

@@ -1,6 +1,6 @@
 """PyForge3D: High-Performance Dual-Backend (C99 Native + Vectorized NumPy) 3D Software Renderer, Textured Z-Buffer, Chunked Voxel Engine & Physics for Pygame."""
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __author__ = "Drakonosinc"
 
 from .camera import Camera3D, FirstPersonController, OrbitCamera

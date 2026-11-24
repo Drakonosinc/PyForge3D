@@ -21,12 +21,16 @@ def _configure_signatures(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.pf3d_clear_zbuf.argtypes = [c_f32_p, ctypes.c_int]
     lib.pf3d_clear_zbuf.restype = None
 
+    lib.pf3d_greedy_mesh_2d.argtypes = [c_i32_p, ctypes.c_int, ctypes.c_int, c_i32_p, ctypes.c_int]
+    lib.pf3d_greedy_mesh_2d.restype = ctypes.c_int
+
     lib.pf3d_rasterize_quads.argtypes = [
         c_u8_p, ctypes.c_int,   # fb_bgra, pitch_bytes
         c_f32_p,                # z_buf
         ctypes.c_int, ctypes.c_int,  # width, height
         ctypes.c_int, ctypes.c_int, ctypes.c_int,  # r_off, g_off, b_off
         c_f32_p, c_f32_p, c_f32_p,  # sx, sy, iz
+        c_f32_p,                # uv_scales (M, 2) or 0
         c_i32_p,                # tex_ids
         c_f32_p, c_f32_p,       # shades, fog_f
         ctypes.c_float, ctypes.c_float, ctypes.c_float,  # fog_r, fog_g, fog_b

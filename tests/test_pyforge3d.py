@@ -407,7 +407,7 @@ class TestPyForge3D(unittest.TestCase):
         sky.sync_lighting(renderer.light, renderer.fog)
 
         drawn = renderer.render_scene(self.screen, cam, scene=scene, voxel_world=world, sky_dome=sky)
-        self.assertGreater(drawn, 15)
+        self.assertGreater(drawn, 4)
 
     def test_13_native_and_numpy_backend_parity_and_frustum_culling(self) -> None:
         from pyforge3d import HAS_NATIVE_RASTERIZER, TextureAtlas
@@ -443,7 +443,7 @@ class TestPyForge3D(unittest.TestCase):
 
         n_nat = r_native.render_scene(surf_native, cam, voxel_world=world, sky_dome=sky)
         n_np = r_numpy.render_scene(surf_numpy, cam, voxel_world=world, sky_dome=sky)
-        self.assertGreater(n_nat, 20)
+        self.assertGreater(n_nat, 4)
         self.assertEqual(n_nat, n_np)
         self.assertTrue(HAS_NATIVE_RASTERIZER)
 
@@ -496,6 +496,46 @@ class TestPyForge3D(unittest.TestCase):
         world2.generate_chunk(0, 0)
         self.assertEqual(world2.get_block(1, 0, 2), mat)
         self.assertFalse(world2.has_block(2, 0, 2))
+
+    def test_15_greedy_meshing_polygon_reduction_and_tiled_parity(self) -> None:
+        # Build a textured 8x8 flat floor + 4x3 wall in two worlds: greedy vs non-greedy!
+        tex_arr = np.zeros((16, 16, 3), dtype=np.uint8)
+        tex_arr[:, :] = (90, 170, 62)
+        tex_arr[0:4, :] = (120, 200, 80)
+        tex_arr[12:16, 12:16] = (40, 80, 35)
+        tex = Texture2D(tex_arr)
+        mat = VoxelMaterial(top_texture=tex, side_texture=tex, bottom_texture=tex, name="Tiled")
+
+        w_greedy = ChunkedVoxelWorld(chunk_size=8, greedy_meshing=True)
+        w_naive = ChunkedVoxelWorld(chunk_size=8, greedy_meshing=False)
+        for x in range(8):
+            for z in range(8):
+                w_greedy.set_block_raw(x, 0, z, mat)
+                w_naive.set_block_raw(x, 0, z, mat)
+        for x in range(2, 6):
+            for y in range(1, 4):
+                w_greedy.set_block_raw(x, y, 5, mat)
+                w_naive.set_block_raw(x, y, 5, mat)
+
+        d_greedy = w_greedy.get_culled_render_data()
+        d_naive = w_naive.get_culled_render_data()
+        # Greedy meshing must slash face count by > 4x!
+        self.assertLess(len(d_greedy["quads"]) * 4, len(d_naive["quads"]))
+
+        # Visually compare rendered pixels between greedy-tiled and un-merged (must match closely!)
+        cam = Camera3D(position=(4.0, 4.2, -3.5), yaw=0.0, pitch=-0.35, fov=72.0)
+        for use_native in (True, False):
+            s_g = pygame.Surface((320, 200), depth=32)
+            s_n = pygame.Surface((320, 200), depth=32)
+            r_g = Renderer3D(320, 200, textured=True, render_scale=0.5, use_native=use_native)
+            r_n = Renderer3D(320, 200, textured=True, render_scale=0.5, use_native=use_native)
+            r_g.fog.enabled = False
+            r_n.fog.enabled = False
+            r_g.render_scene(s_g, cam, voxel_world=w_greedy)
+            r_n.render_scene(s_n, cam, voxel_world=w_naive)
+            arr_g = pygame.surfarray.array3d(s_g).astype(np.int16)
+            arr_n = pygame.surfarray.array3d(s_n).astype(np.int16)
+            self.assertLess(float(np.abs(arr_g - arr_n).mean()), 4.5)
 
 
 if __name__ == "__main__":
