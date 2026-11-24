@@ -3,12 +3,12 @@
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-4B32C3?logo=read-the-docs&logoColor=white)](https://deepwiki.com/Drakonosinc/PyForge3D)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Pygame](https://img.shields.io/badge/Pygame--CE-3D_Software_Engine-00B4AB)
-![Version](https://img.shields.io/badge/Version-1.4.0-22C55E)
+![Version](https://img.shields.io/badge/Version-1.5.0-22C55E)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**PyForge3D** (`pyforge3d`) is a 100% game-agnostic, zero-OpenGL **3D Software Renderer, Textured Z-Buffer Engine, Infinite Chunked Voxel Engine with 2D Greedy Meshing, Procedural Perlin Noise Library, Atmospheric Sky Dome, 3D DDA Raycaster, and 3D AABB Physics engine** built on top of `pygame` / `pygame-ce` and `numpy`.
+**PyForge3D** (`pyforge3d`) is a 100% game-agnostic, zero-OpenGL **3D Software Renderer, Multi-Threaded C99 Textured Z-Buffer Engine, Infinite Chunked Voxel Engine with Native 2D Greedy Meshing, Procedural Perlin Noise Library, Atmospheric Sky Dome, 3D DDA Raycaster, and 3D AABB Physics engine** built on top of `pygame` / `pygame-ce` and `numpy`.
 
-It features a **Dual-Backend Scanline Z-Buffer Pipeline** (a zero-dependency ISO C99 native rasterizer loaded via `ctypes` writing zero-copy directly into SDL's 32-bit surface buffer, plus a 100% portable pure-NumPy fallback with pixel parity) — delivering **90–140+ FPS** at HD/Native resolutions with perspective-correct texture mapping, translucent Water/Glass blending, Ambient Occlusion, and long-range chunked worlds.
+It features a **Dual-Backend Multi-Threaded Scanline Z-Buffer Pipeline** (a zero-dependency ISO C99 native engine loaded via `ctypes` with a persistent Win32/POSIX band thread pool, zero-copy chunk pointer dispatch, span-level early-Z rejection, and single-call C99 greedy chunk meshing — plus a 100% portable pure-NumPy fallback with pixel parity), delivering **145+ FPS** even at 12-chunk (`96m` radius, 480+ chunks) Native resolutions with perspective-correct tiled textures, translucent Water/Glass blending, and Ambient Occlusion.
 
 ---
 

@@ -182,45 +182,61 @@ class SkyDome3D:
                     screen.blit(glow_s, (bx - int(sz * 1.5), by - int(sz * 1.5)))
                     pygame.draw.rect(screen, body_col, (bx - sz // 2, by - sz // 2, sz, sz))
 
-        # 3. Drifting flat 3D blocky clouds overhead
-        cloud_col = pal["cloud"]
-        cloud_y = self.cloud_height
+        # 3. Drifting flat 3D blocky clouds overhead (direct blended RGB polygon draw — zero full-screen alpha blit!)
+        cloud_col = _lerp_rgb(zenith, pal["cloud"], 0.78)
+        cloud_y_rel = self.cloud_height - camera.y
         cam_x, cam_z = camera.x, camera.z
         near_z = 0.5
-        if self._cloud_surf is None or self._cloud_surf_size != (w, h):
-            self._cloud_surf = pygame.Surface((w, h), pygame.SRCALPHA)
-            self._cloud_surf_size = (w, h)
-        else:
-            self._cloud_surf.fill((0, 0, 0, 0))
-        cloud_surf = self._cloud_surf
+        m00, m01, m02 = float(view_mat[0, 0]), float(view_mat[0, 1]), float(view_mat[0, 2])
+        m10, m11, m12 = float(view_mat[1, 0]), float(view_mat[1, 1]), float(view_mat[1, 2])
+        m20, m21, m22 = float(view_mat[2, 0]), float(view_mat[2, 1]), float(view_mat[2, 2])
+        my0, my1, my2 = cloud_y_rel * m10, cloud_y_rel * m11, cloud_y_rel * m12
+        drift = self._cloud_drift
+
         for ox, oz, cw, cd in self._clouds:
-            # Wrap clouds infinitely around the camera
-            rx = ((ox + self._cloud_drift - cam_x + 45.0) % 90.0) - 45.0
+            rx = ((ox + drift - cam_x + 45.0) % 90.0) - 45.0
             rz = ((oz - cam_z + 45.0) % 90.0) - 45.0
-            wx = cam_x + rx
-            wz = cam_z + rz
-            quad_w = np.array(
-                [
-                    [wx - cw * 0.5, cloud_y, wz - cd * 0.5],
-                    [wx + cw * 0.5, cloud_y, wz - cd * 0.5],
-                    [wx + cw * 0.5, cloud_y, wz + cd * 0.5],
-                    [wx - cw * 0.5, cloud_y, wz + cd * 0.5],
-                ],
-                dtype=np.float32,
-            )
-            quad_c = (quad_w - camera.position[None, :]) @ view_mat
-            if float(np.max(quad_c[:, 2])) < near_z:
+            hw = cw * 0.5
+            hd = cd * 0.5
+            x0, x1 = rx - hw, rx + hw
+            z0, z1 = rz - hd, rz + hd
+            # Transform 4 cloud corners in pure scalar floats (zero per-cloud NumPy allocations!)
+            c0z = x0 * m02 + my2 + z0 * m22
+            c1z = x1 * m02 + my2 + z0 * m22
+            c2z = x1 * m02 + my2 + z1 * m22
+            c3z = x0 * m02 + my2 + z1 * m22
+            max_cz = max(c0z, c1z, c2z, c3z)
+            if max_cz < near_z:
                 continue
-            if float(np.min(quad_c[:, 2])) < near_z:
+            c0x = x0 * m00 + my0 + z0 * m20
+            c1x = x1 * m00 + my0 + z0 * m20
+            c2x = x1 * m00 + my0 + z1 * m20
+            c3x = x0 * m00 + my0 + z1 * m20
+            c0y = x0 * m01 + my1 + z0 * m21
+            c1y = x1 * m01 + my1 + z0 * m21
+            c2y = x1 * m01 + my1 + z1 * m21
+            c3y = x0 * m01 + my1 + z1 * m21
+
+            if min(c0z, c1z, c2z, c3z) >= near_z:
+                pts = (
+                    (int(half_w + (c0x / c0z) * scale), int(half_h - (c0y / c0z) * scale)),
+                    (int(half_w + (c1x / c1z) * scale), int(half_h - (c1y / c1z) * scale)),
+                    (int(half_w + (c2x / c2z) * scale), int(half_h - (c2y / c2z) * scale)),
+                    (int(half_w + (c3x / c3z) * scale), int(half_h - (c3y / c3z) * scale)),
+                )
+            else:
+                quad_c = np.array(
+                    ((c0x, c0y, c0z), (c1x, c1y, c1z), (c2x, c2y, c2z), (c3x, c3y, c3z)),
+                    dtype=np.float32,
+                )
                 quad_c = clip_polygon_near_plane(quad_c, near_z)
                 if len(quad_c) < 3:
                     continue
-            pts = [
-                (
-                    int(half_w + (float(p[0]) / float(p[2])) * scale),
-                    int(half_h - (float(p[1]) / float(p[2])) * scale),
-                )
-                for p in quad_c
-            ]
-            pygame.draw.polygon(cloud_surf, (*cloud_col, 185), pts)
-        screen.blit(cloud_surf, (0, 0))
+                pts = [
+                    (
+                        int(half_w + (float(p[0]) / float(p[2])) * scale),
+                        int(half_h - (float(p[1]) / float(p[2])) * scale),
+                    )
+                    for p in quad_c
+                ]
+            pygame.draw.polygon(screen, cloud_col, pts)

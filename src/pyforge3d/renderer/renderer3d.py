@@ -71,12 +71,40 @@ class Renderer3D:
         self.render_scale: float = max(0.2, min(1.0, float(render_scale)))
         self.texture_lod_distance: float = max(4.0, float(texture_lod_distance))
         self.use_native: bool = bool(use_native)
+        self.chunk_rebuild_budget_ms: float | None = None
         self.last_rendered_faces: int = 0
         self._sky_cache_key = None
         self._sky_cache_surf: pygame.Surface | None = None
         self._rasterizer: SoftwareTexturedRasterizer | None = None
         self._empty_atlas: TextureAtlas = TextureAtlas()
         self._empty_atlas.ensure_packed()
+        self._ptr_cap: int = 0
+        self._c_quads: np.ndarray = np.empty((0,), dtype=np.uintp)
+        self._c_normals: np.ndarray = np.empty((0,), dtype=np.uintp)
+        self._c_colors: np.ndarray = np.empty((0,), dtype=np.uintp)
+        self._c_uvs: np.ndarray = np.empty((0,), dtype=np.uintp)
+        self._c_tids: np.ndarray = np.empty((0,), dtype=np.uintp)
+        self._c_alphas: np.ndarray = np.empty((0,), dtype=np.uintp)
+        self._c_emissive: np.ndarray = np.empty((0,), dtype=np.uintp)
+        self._c_ao: np.ndarray = np.empty((0,), dtype=np.uintp)
+        self._c_is_tr: np.ndarray = np.empty((0,), dtype=np.uintp)
+        self._c_counts: np.ndarray = np.empty((0,), dtype=np.int32)
+
+    def _ensure_chunk_ptr_bufs(self, n: int) -> None:
+        if self._ptr_cap >= n:
+            return
+        cap = max(64, n * 2)
+        self._ptr_cap = cap
+        self._c_quads = np.empty((cap,), dtype=np.uintp)
+        self._c_normals = np.empty((cap,), dtype=np.uintp)
+        self._c_colors = np.empty((cap,), dtype=np.uintp)
+        self._c_uvs = np.empty((cap,), dtype=np.uintp)
+        self._c_tids = np.empty((cap,), dtype=np.uintp)
+        self._c_alphas = np.empty((cap,), dtype=np.uintp)
+        self._c_emissive = np.empty((cap,), dtype=np.uintp)
+        self._c_ao = np.empty((cap,), dtype=np.uintp)
+        self._c_is_tr = np.empty((cap,), dtype=np.uintp)
+        self._c_counts = np.empty((cap,), dtype=np.int32)
 
     @property
     def native_active(self) -> bool:
@@ -247,20 +275,19 @@ class Renderer3D:
             else:
                 surf.blit(screen, (0, 0))
 
-        NATIVE_LIB.pf3d_clear_zbuf(rast.z_buf.ctypes.data, rast.z_buf.size)
-
         half_w = rw * 0.5
         half_h = rh * 0.5
         focal = 1.0 / math.tan(math.radians(camera.fov) * 0.5)
         proj_scale = focal * half_h
 
         cam_pos = camera.position
-        view_mat = camera.get_view_matrix_3x3()
+        view_mat = np.ascontiguousarray(camera.get_view_matrix_3x3(), dtype=np.float32)
         near_z = camera.near
         far_z = camera.far
         fog_enabled = self.fog.enabled
         fog_near = self.fog.near
         fog_span = max(1e-5, self.fog.far - self.fog.near)
+        fog_inv_span = 1.0 / fog_span
         fog_r = float(self.fog.color[0])
         fog_g = float(self.fog.color[1])
         fog_b = float(self.fog.color[2])
@@ -275,166 +302,90 @@ class Renderer3D:
 
         atlas: TextureAtlas = self._empty_atlas
         total_faces = 0
-
-        # Prepare voxel batches entirely in vectorized NumPy (zero Python per-quad loops!)
-        fast_sx = fast_sy = fast_iz = fast_uvs = None
-        fast_tids = fast_shades = fast_fog = fast_solid = fast_alphas = None
-        op_order = tr_order = None
-        straddle_op: list[tuple] = []
         straddle_tr: list[tuple] = []
 
+        # Collect visible voxel chunks with ZERO np.concatenate & ZERO per-quad NumPy allocations!
+        n_chunks = 0
+        _keep_refs: list[Any] = []
         if voxel_world is not None:
-            data = self._fetch_voxel_data(
-                voxel_world, cam_pos, view_mat, near_z, far_z, half_w, half_h, proj_scale, include_textures=False
-            )
-            atlas = data.get("atlas", self._empty_atlas)
-            atlas.ensure_packed()
-            quads_w = data["quads"]
+            if hasattr(voxel_world, "get_visible_chunks"):
+                vis_chunks, atlas = voxel_world.get_visible_chunks(
+                    cam_pos,
+                    view_mat,
+                    near_z,
+                    far_z,
+                    half_w,
+                    half_h,
+                    proj_scale,
+                    rebuild_budget_ms=self.chunk_rebuild_budget_ms,
+                )
+                n_chunks = len(vis_chunks)
+                if n_chunks > 0:
+                    self._ensure_chunk_ptr_bufs(n_chunks)
+                    cq = self._c_quads
+                    cn = self._c_normals
+                    cc = self._c_colors
+                    cu = self._c_uvs
+                    ct = self._c_tids
+                    ca = self._c_alphas
+                    ce = self._c_emissive
+                    cao = self._c_ao
+                    ctr = self._c_is_tr
+                    cnt = self._c_counts
+                    for idx_c, ch in enumerate(vis_chunks):
+                        cq[idx_c] = ch.quads.ctypes.data
+                        cn[idx_c] = ch.normals.ctypes.data
+                        cc[idx_c] = ch.colors.ctypes.data
+                        cu[idx_c] = ch.uv_scales.ctypes.data
+                        ct[idx_c] = ch.tex_ids.ctypes.data
+                        ca[idx_c] = ch.alphas.ctypes.data
+                        ce[idx_c] = ch.emissive.ctypes.data
+                        cao[idx_c] = ch.ao.ctypes.data
+                        ctr[idx_c] = ch.is_translucent.ctypes.data
+                        cnt[idx_c] = len(ch.quads)
+            else:
+                data = voxel_world.get_culled_render_data()
+                atlas = data.get("atlas", self._empty_atlas)
+                quads_w = data["quads"]
+                if len(quads_w) > 0:
+                    self._ensure_chunk_ptr_bufs(1)
+                    n_chunks = 1
+                    q_c = np.ascontiguousarray(quads_w, dtype=np.float32)
+                    n_c = np.ascontiguousarray(data["normals"], dtype=np.float32)
+                    c_c = np.ascontiguousarray(data["colors"], dtype=np.float32)
+                    uv_raw = data.get("uv_scales")
+                    uv_c = np.ascontiguousarray(uv_raw, dtype=np.float32) if uv_raw is not None else None
+                    t_c = np.ascontiguousarray(data["tex_ids"], dtype=np.int32)
+                    a_c = np.ascontiguousarray(data["alphas"], dtype=np.uint8)
+                    e_c = np.ascontiguousarray(data["emissive"], dtype=np.float32)
+                    ao_c = np.ascontiguousarray(data["ao"], dtype=np.float32)
+                    tr_c = np.ascontiguousarray(data["is_translucent"], dtype=np.uint8)
+                    _keep_refs.extend((q_c, n_c, c_c, uv_c, t_c, a_c, e_c, ao_c, tr_c))
+                    self._c_quads[0] = q_c.ctypes.data
+                    self._c_normals[0] = n_c.ctypes.data
+                    self._c_colors[0] = c_c.ctypes.data
+                    self._c_uvs[0] = uv_c.ctypes.data if uv_c is not None else 0
+                    self._c_tids[0] = t_c.ctypes.data
+                    self._c_alphas[0] = a_c.ctypes.data
+                    self._c_emissive[0] = e_c.ctypes.data
+                    self._c_ao[0] = ao_c.ctypes.data
+                    self._c_is_tr[0] = tr_c.ctypes.data
+                    self._c_counts[0] = len(q_c)
 
-            if len(quads_w) > 0:
-                normals_w = data["normals"]
-                centers_w = quads_w.mean(axis=1)
-                to_face = centers_w - cam_pos[None, :]
-                front_idx = np.flatnonzero(np.einsum("ij,ij->i", normals_w, to_face) < -1e-5)
-
-                if len(front_idx) > 0:
-                    q_vis = quads_w[front_idx]
-                    k_vis = len(q_vis)
-                    q_cam = ((q_vis.reshape(-1, 3) - cam_pos[None, :]) @ view_mat).reshape(k_vis, 4, 3)
-
-                    z_vals = q_cam[:, :, 2]
-                    max_z = np.max(z_vals, axis=1)
-                    min_z = np.min(z_vals, axis=1)
-                    x_vals = q_cam[:, :, 0]
-                    y_vals = q_cam[:, :, 1]
-                    max_z_pos = np.maximum(max_z, 1.0)
-                    max_x_allow = max_z_pos * ((half_w / proj_scale) + 0.55) + 1.4
-                    max_y_allow = max_z_pos * ((half_h / proj_scale) + 0.55) + 1.4
-                    keep_sub = np.flatnonzero(
-                        (max_z >= near_z)
-                        & (min_z <= far_z)
-                        & (np.min(x_vals, axis=1) <= max_x_allow)
-                        & (np.max(x_vals, axis=1) >= -max_x_allow)
-                        & (np.min(y_vals, axis=1) <= max_y_allow)
-                        & (np.max(y_vals, axis=1) >= -max_y_allow)
-                    )
-
-                    if len(keep_sub) > 0:
-                        orig_idx = front_idx[keep_sub]
-                        q_cam = q_cam[keep_sub]
-                        min_z = min_z[keep_sub]
-                        n_vis = normals_w[orig_idx]
-                        c_vis = data["colors"][orig_idx]
-                        cent_vis = centers_w[orig_idx]
-                        a_vis = data["alphas"][orig_idx]
-                        em_vis = data["emissive"][orig_idx]
-                        ao_vis = data["ao"][orig_idx]
-                        tids_vis = data["tex_ids"][orig_idx]
-                        tr_vis = data["is_translucent"][orig_idx]
-                        uvs_vis = data["uv_scales"][orig_idx] if "uv_scales" in data else np.ones((len(orig_idx), 2), dtype=np.float32)
-
-                        cam_centers = q_cam.mean(axis=1)
-                        depths = np.sqrt(
-                            cam_centers[:, 0] ** 2 + cam_centers[:, 1] ** 2 + cam_centers[:, 2] ** 2
-                        ).astype(np.float32)
-
-                        intensities = self.light.compute_intensities(n_vis, cent_vis)
-                        face_bias = np.where(
-                            n_vis[:, 1] > 0.5,
-                            1.06,
-                            np.where(
-                                n_vis[:, 1] < -0.5,
-                                0.64,
-                                np.where(np.abs(n_vis[:, 0]) > 0.5, 0.84, 0.94),
-                            ),
-                        ).astype(np.float32)
-                        shades = np.clip(intensities * face_bias * ao_vis + em_vis, 0.15, 1.35).astype(np.float32)
-                        fog_factors = (
-                            np.clip((depths - fog_near) / fog_span, 0.0, 1.0).astype(np.float32)
-                            if fog_enabled
-                            else np.zeros_like(depths)
-                        )
-                        lit_colors = c_vis * shades[:, None]
-                        final_colors = np.clip(self.fog.apply_to_colors(lit_colors, depths), 0.0, 255.0).astype(np.uint8)
-
-                        # Apply distance LOD to texture IDs vectorially
-                        tids_lod = np.where(depths <= lod_dist, tids_vis, -1).astype(np.int32)
-
-                        all_in_front = min_z >= near_z
-                        fast_sub = np.flatnonzero(all_in_front)
-                        if len(fast_sub) > 0:
-                            q_fast = q_cam[fast_sub]
-                            inv_z_fast = (1.0 / np.maximum(q_fast[:, :, 2], near_z * 0.5)).astype(np.float32)
-                            sx_fast = (half_w + q_fast[:, :, 0] * inv_z_fast * proj_scale).astype(np.float32)
-                            sy_fast = (half_h - q_fast[:, :, 1] * inv_z_fast * proj_scale).astype(np.float32)
-
-                            on_scr = np.flatnonzero(
-                                (np.max(sx_fast, axis=1) >= 0.0)
-                                & (np.min(sx_fast, axis=1) < rw)
-                                & (np.max(sy_fast, axis=1) >= 0.0)
-                                & (np.min(sy_fast, axis=1) < rh)
-                            )
-                            if len(on_scr) > 0:
-                                sel = fast_sub[on_scr]
-                                fast_sx = np.ascontiguousarray(sx_fast[on_scr], dtype=np.float32)
-                                fast_sy = np.ascontiguousarray(sy_fast[on_scr], dtype=np.float32)
-                                fast_iz = np.ascontiguousarray(inv_z_fast[on_scr], dtype=np.float32)
-                                fast_uvs = np.ascontiguousarray(uvs_vis[sel], dtype=np.float32)
-                                fast_tids = np.ascontiguousarray(tids_lod[sel], dtype=np.int32)
-                                fast_shades = np.ascontiguousarray(shades[sel], dtype=np.float32)
-                                fast_fog = np.ascontiguousarray(fog_factors[sel], dtype=np.float32)
-                                fast_solid = np.ascontiguousarray(final_colors[sel], dtype=np.uint8)
-                                fast_alphas = np.ascontiguousarray(a_vis[sel], dtype=np.uint8)
-                                fast_depths = depths[sel]
-                                fast_tr = tr_vis[sel]
-
-                                op_idx = np.flatnonzero(~fast_tr)
-                                tr_idx = np.flatnonzero(fast_tr)
-                                if len(op_idx) > 0:
-                                    op_order = np.ascontiguousarray(op_idx[np.argsort(fast_depths[op_idx])], dtype=np.int32)
-                                if len(tr_idx) > 0:
-                                    tr_order = np.ascontiguousarray(tr_idx[np.argsort(-fast_depths[tr_idx])], dtype=np.int32)
-                                total_faces += len(on_scr)
-
-                        # Near-plane clipped straddling quads (scales tiled UVs for greedy quads!)
-                        straddle_sub = np.flatnonzero(~all_in_front)
-                        for local_i in straddle_sub:
-                            scaled_uv = CANONICAL_QUAD_UV * uvs_vis[local_i][None, :]
-                            clipped_p, clipped_uv = clip_textured_polygon_near_plane(
-                                q_cam[local_i], scaled_uv, near_z
-                            )
-                            nv = len(clipped_p)
-                            if nv < 3 or nv > 8:
-                                continue
-                            z_s = np.maximum(clipped_p[:, 2], near_z * 0.5)
-                            iz_a = (1.0 / z_s).astype(np.float32)
-                            px_a = (half_w + clipped_p[:, 0] * iz_a * proj_scale).astype(np.float32)
-                            py_a = (half_h - clipped_p[:, 1] * iz_a * proj_scale).astype(np.float32)
-                            if float(px_a.max()) < 0.0 or float(px_a.min()) >= rw or float(py_a.max()) < 0.0 or float(py_a.min()) >= rh:
-                                continue
-                            u_a = np.ascontiguousarray(clipped_uv[:, 0], dtype=np.float32)
-                            v_a = np.ascontiguousarray(clipped_uv[:, 1], dtype=np.float32)
-                            entry = (
-                                float(depths[local_i]),
-                                np.ascontiguousarray(px_a),
-                                np.ascontiguousarray(py_a),
-                                np.ascontiguousarray(iz_a),
-                                u_a,
-                                v_a,
-                                nv,
-                                int(tids_lod[local_i]),
-                                float(shades[local_i]),
-                                float(fog_factors[local_i]),
-                                int(final_colors[local_i, 0]),
-                                int(final_colors[local_i, 1]),
-                                int(final_colors[local_i, 2]),
-                                int(a_vis[local_i]),
-                            )
-                            if bool(tr_vis[local_i]):
-                                straddle_tr.append(entry)
-                            else:
-                                straddle_op.append(entry)
-                            total_faces += 1
+        # Extract light scalars (supports both DirectionalLight and PointLight agnostically)
+        if isinstance(self.light, PointLight):
+            light_type = 1
+            lx, ly, lz = float(self.light.position[0]), float(self.light.position[1]), float(self.light.position[2])
+            l_ambient = float(self.light.ambient)
+            l_diffuse = float(self.light.intensity)
+            l_atten = float(self.light.attenuation)
+        else:
+            light_type = 0
+            tl = self.light.to_light_dir
+            lx, ly, lz = float(tl[0]), float(tl[1]), float(tl[2])
+            l_ambient = float(self.light.ambient)
+            l_diffuse = float(self.light.diffuse)
+            l_atten = 0.0
 
         # Prepare Scene3D Mesh3D polygons (supports both solid & textured Mesh3D!)
         mesh_polys: list[tuple] = []
@@ -597,31 +548,39 @@ class Renderer3D:
         fb_arr = np.frombuffer(surf_buf, dtype=np.uint8)
         fb_ptr = fb_arr.ctypes.data
         try:
-            # Pass 1: ALL Opaque Voxel Quads (FRONT-TO-BACK in ONE single C99 call!)
-            if op_order is not None and len(op_order) > 0:
-                NATIVE_LIB.pf3d_rasterize_quads(
+            # Pass 1: ALL Visible Voxel Chunks (Transform + Cull + Light + Clip + Multi-Threaded Band Z-Buffer!)
+            if n_chunks > 0:
+                drawn_voxels = NATIVE_LIB.pf3d_render_voxel_chunks(
                     fb_ptr, pitch, z_ptr, rw, rh, r_off, g_off, b_off,
-                    fast_sx.ctypes.data, fast_sy.ctypes.data, fast_iz.ctypes.data,
-                    fast_uvs.ctypes.data,
-                    fast_tids.ctypes.data, fast_shades.ctypes.data, fast_fog.ctypes.data,
+                    int(n_chunks),
+                    self._c_quads.ctypes.data,
+                    self._c_normals.ctypes.data,
+                    self._c_colors.ctypes.data,
+                    self._c_uvs.ctypes.data,
+                    self._c_tids.ctypes.data,
+                    self._c_alphas.ctypes.data,
+                    self._c_emissive.ctypes.data,
+                    self._c_ao.ctypes.data,
+                    self._c_is_tr.ctypes.data,
+                    self._c_counts.ctypes.data,
+                    float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2]),
+                    view_mat.ctypes.data,
+                    float(near_z), float(far_z),
+                    float(half_w), float(half_h), float(proj_scale),
+                    float(lod_dist),
+                    int(light_type),
+                    lx, ly, lz,
+                    l_ambient, l_diffuse, l_atten,
+                    1 if fog_enabled else 0, float(fog_near), float(fog_inv_span),
                     fog_r, fog_g, fog_b,
-                    fast_solid.ctypes.data, fast_alphas.ctypes.data,
                     a_rgb_ptr, a_alp_ptr, a_off_ptr, a_w_ptr, a_h_ptr, a_cut_ptr,
-                    op_order.ctypes.data, int(len(op_order)),
+                    1,  # parallel Z-buffer clear across threads!
                 )
+                total_faces += int(drawn_voxels)
+            else:
+                NATIVE_LIB.pf3d_clear_zbuf(z_ptr, rast.z_buf.size)
 
-            # Pass 2: Clipped Opaque Voxel Quads & Scene3D Meshes
-            if straddle_op:
-                straddle_op.sort(key=lambda e: e[0])
-                for _, px_a, py_a, iz_a, u_a, v_a, nv, tid, sh, ff, sr, sg, sb, alp in straddle_op:
-                    NATIVE_LIB.pf3d_rasterize_polygon(
-                        fb_ptr, pitch, z_ptr, rw, rh, r_off, g_off, b_off,
-                        px_a.ctypes.data, py_a.ctypes.data, iz_a.ctypes.data,
-                        u_a.ctypes.data, v_a.ctypes.data, nv, tid, sh, ff,
-                        fog_r, fog_g, fog_b, sr, sg, sb, alp,
-                        a_rgb_ptr, a_alp_ptr, a_off_ptr, a_w_ptr, a_h_ptr, a_cut_ptr,
-                    )
-
+            # Pass 2: Scene3D Opaque Meshes (Dropped items, entities, custom 3D models)
             if mesh_polys:
                 mesh_polys.sort(key=lambda e: e[0])
                 for _, px_a, py_a, iz_a, u_a, v_a, nv, tid, sh, ff, sr, sg, sb, alp in mesh_polys:
@@ -635,19 +594,7 @@ class Renderer3D:
                         a_rgb_ptr, a_alp_ptr, a_off_ptr, a_w_ptr, a_h_ptr, a_cut_ptr,
                     )
 
-            # Pass 3: ALL Translucent Voxel Quads (Water & Glass, BACK-TO-FRONT in ONE C99 call!)
-            if tr_order is not None and len(tr_order) > 0:
-                NATIVE_LIB.pf3d_rasterize_quads(
-                    fb_ptr, pitch, z_ptr, rw, rh, r_off, g_off, b_off,
-                    fast_sx.ctypes.data, fast_sy.ctypes.data, fast_iz.ctypes.data,
-                    fast_uvs.ctypes.data,
-                    fast_tids.ctypes.data, fast_shades.ctypes.data, fast_fog.ctypes.data,
-                    fog_r, fog_g, fog_b,
-                    fast_solid.ctypes.data, fast_alphas.ctypes.data,
-                    a_rgb_ptr, a_alp_ptr, a_off_ptr, a_w_ptr, a_h_ptr, a_cut_ptr,
-                    tr_order.ctypes.data, int(len(tr_order)),
-                )
-
+            # Pass 3: Translucent Meshes & Voxel Block Overlays / Decals (mining cracks, runes)
             if mesh_tr_polys:
                 straddle_tr.extend(mesh_tr_polys)
             if straddle_tr:

@@ -537,6 +537,70 @@ class TestPyForge3D(unittest.TestCase):
             arr_n = pygame.surfarray.array3d(s_n).astype(np.int16)
             self.assertLess(float(np.abs(arr_g - arr_n).mean()), 4.5)
 
+    def test_16_multithreaded_c99_chunk_pipeline_and_native_mesher_parity(self) -> None:
+        # 1. Scalar vs NumPy array hash_2d exact parity
+        xs = np.array([0, 17, -42, 1024], dtype=np.int64)
+        zs = np.array([5, -9, 313, -777], dtype=np.int64)
+        arr_h = hash_2d(xs, zs, seed=99)
+        for i in range(len(xs)):
+            self.assertAlmostEqual(float(hash_2d(int(xs[i]), int(zs[i]), seed=99)), float(arr_h[i]), places=6)
+
+        # 2. Multi-chunk world: 1-thread vs N-thread C99 chunk pipeline must be 100% bit-exact!
+        tex_arr = np.zeros((16, 16, 3), dtype=np.uint8)
+        tex_arr[:, :] = (82, 162, 68)
+        tex_arr[0:3, :] = (115, 200, 82)
+        tex = Texture2D(tex_arr)
+        mat = VoxelMaterial(top_texture=tex, side_texture=tex, bottom_texture=tex, name="Terrain")
+        water = VoxelMaterial(
+            top=(45, 130, 225),
+            side=(45, 130, 225),
+            bottom=(45, 130, 225),
+            alpha=150,
+            solid=False,
+            name="Water",
+        )
+
+        def gen(cx: int, cz: int, cs: int, w: ChunkedVoxelWorld) -> None:
+            for ix in range(cs):
+                wx = cx * cs + ix
+                for iz in range(cs):
+                    wz = cz * cs + iz
+                    h = 2 + ((wx * 3 + wz * 5) & 3)
+                    for y in range(h):
+                        w.set_block_raw(wx, y, wz, mat)
+                    if h == 2:
+                        w.set_block_raw(wx, 2, wz, water)
+
+        world = ChunkedVoxelWorld(chunk_size=8, generator_fn=gen, greedy_meshing=True)
+        world.update_chunks_around(0.0, 0.0, load_radius=2, unload_radius=4, max_new_per_call=99, max_gen_ms=200.0)
+
+        cam = Camera3D(position=(2.0, 7.5, -8.0), yaw=0.2, pitch=-0.38, fov=75.0, near=0.08, far=60.0)
+        from pyforge3d.renderer.native_bridge import HAS_NATIVE_RASTERIZER, NATIVE_LIB
+
+        if HAS_NATIVE_RASTERIZER and NATIVE_LIB is not None:
+            orig_t = NATIVE_LIB.pf3d_get_num_threads()
+            try:
+                s1 = pygame.Surface((480, 270), depth=32)
+                s_mt = pygame.Surface((480, 270), depth=32)
+                r1 = Renderer3D(480, 270, textured=True, render_scale=1.0, use_native=True)
+                r_mt = Renderer3D(480, 270, textured=True, render_scale=1.0, use_native=True)
+                r1.chunk_rebuild_budget_ms = 5.0
+                r_mt.chunk_rebuild_budget_ms = 5.0
+
+                NATIVE_LIB.pf3d_set_num_threads(1)
+                f1 = r1.render_scene(s1, cam, voxel_world=world)
+
+                NATIVE_LIB.pf3d_set_num_threads(orig_t)
+                f_mt = r_mt.render_scene(s_mt, cam, voxel_world=world)
+
+                self.assertEqual(f1, f_mt)
+                self.assertGreater(f1, 10)
+                a1 = pygame.surfarray.array3d(s1)
+                amt = pygame.surfarray.array3d(s_mt)
+                self.assertTrue(np.array_equal(a1, amt))
+            finally:
+                NATIVE_LIB.pf3d_set_num_threads(orig_t)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

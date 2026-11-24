@@ -5,6 +5,11 @@ import numpy as np
 
 def hash_2d(x: int | np.ndarray, z: int | np.ndarray, seed: int = 0) -> float | np.ndarray:
     """Deterministic fast hash mapping integer 2D coordinates (x, z) to [0.0, 1.0)."""
+    if isinstance(x, (int, np.integer)) and isinstance(z, (int, np.integer)):
+        h = (int(x) * 374761393 + int(z) * 668265263 + int(seed) * 1442695041) & 0xFFFFFFFF
+        h = ((h ^ (h >> 13)) * 1274126177) & 0xFFFFFFFF
+        h = h ^ (h >> 16)
+        return h * (1.0 / 4294967296.0)
     is_scalar = np.ndim(x) == 0 and np.ndim(z) == 0
     ix = np.asarray(x, dtype=np.int64)
     iz = np.asarray(z, dtype=np.int64)

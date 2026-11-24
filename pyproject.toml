@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyforge3d"
-version = "1.4.0"
+version = "1.5.0"
 description = "Vectorized 3D Software Renderer, Voxel World Engine, 3D Meshes, Lighting, Raycasting, and AABB Physics library for Pygame."
 readme = "README.md"
 license = { text = "MIT" }
