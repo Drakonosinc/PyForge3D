@@ -51,6 +51,17 @@ class AABB3D:
             and self.max_z > other.min_z
         )
 
+    def intersects_voxel(self, bx: int, by: int, bz: int) -> bool:
+        """Check whether this AABB overlaps the unit voxel cell [bx, bx+1] x [by, by+1] x [bz, bz+1]."""
+        return (
+            self.min_x < bx + 1.0
+            and self.max_x > bx
+            and self.min_y < by + 1.0
+            and self.max_y > by
+            and self.min_z < bz + 1.0
+            and self.max_z > bz
+        )
+
 
 class VoxelPhysicsBody:
     """
@@ -102,6 +113,10 @@ class VoxelPhysicsBody:
             self.on_ground = False
             return True
         return False
+
+    def intersects_block(self, bx: int, by: int, bz: int) -> bool:
+        """Return True if placing a block at (bx, by, bz) would intersect this physics body."""
+        return self.aabb.intersects_voxel(int(bx), int(by), int(bz))
 
     def _collides_with_world(self, world: VoxelWorld) -> bool:
         eps = 1e-4

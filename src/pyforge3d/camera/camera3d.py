@@ -106,6 +106,21 @@ class Camera3D:
         sy = half_h - (pts[:, 1] / z_safe) * scale
         return np.column_stack((sx, sy))
 
+    def project_world_point(
+        self,
+        point_world: tuple[float, float, float] | np.ndarray,
+        screen_width: int,
+        screen_height: int,
+    ) -> tuple[int, int, float] | None:
+        """Project a single 3D world point to (screen_x, screen_y, depth), or None if behind near plane."""
+        pt = np.asarray(point_world, dtype=np.float32).reshape(1, 3)
+        pt_c = self.world_to_camera(pt)
+        z = float(pt_c[0, 2])
+        if z < self.near:
+            return None
+        pt_2d = self.project_camera_vertices(pt_c, screen_width, screen_height)
+        return (int(round(float(pt_2d[0, 0]))), int(round(float(pt_2d[0, 1]))), z)
+
 
 class FirstPersonController:
     """Plug-and-play FPS / Minecraft camera controller supporting WASD movement, mouse look, and flying/walking."""
@@ -123,6 +138,29 @@ class FirstPersonController:
         self.mouse_sensitivity = float(mouse_sensitivity)
         self.turn_speed = float(turn_speed)
         self.max_pitch = float(max_pitch)
+        self.mouse_captured: bool = False
+
+    def set_mouse_capture(self, captured: bool) -> None:
+        """Enable or disable mouse lock & relative motion for 3D first-person look."""
+        self.mouse_captured = bool(captured)
+        try:
+            pygame.event.set_grab(self.mouse_captured)
+            pygame.mouse.set_visible(not self.mouse_captured)
+            if self.mouse_captured:
+                pygame.mouse.get_rel()
+        except Exception:
+            pass
+
+    def handle_event(self, event: pygame.event.Event) -> bool:
+        """Process MOUSEMOTION events when mouse is captured (or while holding right/middle mouse button)."""
+        if event.type == pygame.MOUSEMOTION:
+            if self.mouse_captured or pygame.mouse.get_pressed()[2] or pygame.mouse.get_pressed()[1]:
+                rel_x, rel_y = event.rel
+                # Ignore initial jump spike when grabbing mouse
+                if abs(rel_x) < 250 and abs(rel_y) < 250:
+                    self.handle_mouse_motion(rel_x, rel_y)
+                    return True
+        return False
 
     def rotate(self, delta_yaw: float, delta_pitch: float) -> None:
         self.camera.yaw = (self.camera.yaw + delta_yaw) % math.tau
@@ -131,35 +169,48 @@ class FirstPersonController:
     def handle_mouse_motion(self, rel_x: int, rel_y: int) -> None:
         self.rotate(rel_x * self.mouse_sensitivity, -rel_y * self.mouse_sensitivity)
 
-    def update(self, dt: float, keys=None, fly_mode: bool = True) -> np.ndarray:
-        """
-        Process keyboard input (WASD for movement, Arrow keys for camera rotation, Space/LShift for vertical).
-        Returns the world-space displacement vector applied to the camera.
-        """
+    def get_desired_velocity(
+        self,
+        dt: float,
+        keys=None,
+        key_forward: int = pygame.K_w,
+        key_backward: int = pygame.K_s,
+        key_left: int = pygame.K_a,
+        key_right: int = pygame.K_d,
+        key_up: int = pygame.K_SPACE,
+        key_down: int = pygame.K_LSHIFT,
+    ) -> tuple[float, float, float]:
+        """Compute desired (vx, vy, vz) velocity from keyboard state and process arrow-key look rotation."""
         if keys is None:
             keys = pygame.key.get_pressed()
 
-        # Arrow keys rotate camera even without mouse lock
         yaw_input = float(bool(keys[pygame.K_RIGHT])) - float(bool(keys[pygame.K_LEFT]))
         pitch_input = float(bool(keys[pygame.K_UP])) - float(bool(keys[pygame.K_DOWN]))
         if yaw_input != 0.0 or pitch_input != 0.0:
             self.rotate(yaw_input * self.turn_speed * dt, pitch_input * self.turn_speed * dt)
 
-        fwd_input = float(bool(keys[pygame.K_w])) - float(bool(keys[pygame.K_s]))
-        right_input = float(bool(keys[pygame.K_d])) - float(bool(keys[pygame.K_a]))
-        up_input = float(bool(keys[pygame.K_SPACE])) - float(
-            bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] or keys[pygame.K_c])
-        )
+        fwd_input = float(bool(keys[key_forward])) - float(bool(keys[key_backward]))
+        right_input = float(bool(keys[key_right])) - float(bool(keys[key_left]))
+        up_input = float(bool(keys[key_up])) - float(bool(keys[key_down] or keys[pygame.K_RSHIFT] or keys[pygame.K_c]))
 
         move_vec = self.camera.forward_flat * fwd_input + self.camera.right * right_input
         horiz_norm = float(np.linalg.norm(move_vec))
         if horiz_norm > 1e-6:
             move_vec = move_vec / horiz_norm
 
-        if fly_mode:
-            move_vec[1] += up_input
+        return (
+            float(move_vec[0] * self.move_speed),
+            float(up_input * self.move_speed),
+            float(move_vec[2] * self.move_speed),
+        )
 
-        displacement = move_vec * (self.move_speed * dt)
+    def update(self, dt: float, keys=None, fly_mode: bool = True) -> np.ndarray:
+        """
+        Process keyboard input (WASD for movement, Arrow keys for camera rotation, Space/LShift for vertical).
+        Returns the world-space displacement vector applied to the camera.
+        """
+        vx, vy, vz = self.get_desired_velocity(dt, keys=keys)
+        displacement = np.array([vx * dt, (vy * dt) if fly_mode else 0.0, vz * dt], dtype=np.float32)
         self.camera.position = self.camera.position + displacement
         return displacement
 

@@ -6,6 +6,23 @@ import numpy as np
 
 
 @dataclass(frozen=True)
+class VoxelMaterial:
+    """Multi-face RGB color definition for Minecraft-style blocks (distinct top, side, and bottom colors)."""
+
+    top: tuple[int, int, int]
+    side: tuple[int, int, int]
+    bottom: tuple[int, int, int] | None = None
+
+    def color_for_normal(self, normal: tuple[int, int, int]) -> tuple[int, int, int]:
+        ny = normal[1]
+        if ny > 0:
+            return self.top
+        if ny < 0:
+            return self.bottom if self.bottom is not None else self.side
+        return self.side
+
+
+@dataclass(frozen=True)
 class VoxelHit:
     """Result of a 3D DDA voxel raycast query."""
 
@@ -53,17 +70,23 @@ class VoxelWorld:
     """
 
     def __init__(self) -> None:
-        self.blocks: dict[tuple[int, int, int], tuple[int, int, int]] = {}
+        self.blocks: dict[tuple[int, int, int], tuple[int, int, int] | VoxelMaterial] = {}
         self._dirty: bool = True
         self._cached_quads: np.ndarray = np.empty((0, 4, 3), dtype=np.float32)
         self._cached_normals: np.ndarray = np.empty((0, 3), dtype=np.float32)
         self._cached_colors: np.ndarray = np.empty((0, 3), dtype=np.float32)
 
-    def set_block(self, x: int, y: int, z: int, color: tuple[int, int, int] = (56, 189, 248)) -> None:
+    @staticmethod
+    def _coerce_material(color: tuple[int, int, int] | VoxelMaterial) -> tuple[int, int, int] | VoxelMaterial:
+        if isinstance(color, VoxelMaterial):
+            return color
+        return (int(color[0]), int(color[1]), int(color[2]))
+
+    def set_block(self, x: int, y: int, z: int, color: tuple[int, int, int] | VoxelMaterial = (56, 189, 248)) -> None:
         pos = (int(x), int(y), int(z))
-        rgb = (int(color[0]), int(color[1]), int(color[2]))
-        if self.blocks.get(pos) != rgb:
-            self.blocks[pos] = rgb
+        mat = self._coerce_material(color)
+        if self.blocks.get(pos) != mat:
+            self.blocks[pos] = mat
             self._dirty = True
 
     def remove_block(self, x: int, y: int, z: int) -> bool:
@@ -77,8 +100,40 @@ class VoxelWorld:
     def has_block(self, x: int, y: int, z: int) -> bool:
         return (int(x), int(y), int(z)) in self.blocks
 
-    def get_block(self, x: int, y: int, z: int) -> tuple[int, int, int] | None:
+    def get_block(self, x: int, y: int, z: int) -> tuple[int, int, int] | VoxelMaterial | None:
         return self.blocks.get((int(x), int(y), int(z)))
+
+    def get_highest_solid_y(self, x: int, z: int) -> int | None:
+        """Return the highest solid block Y index at column (x, z), or None if empty."""
+        ix, iz = int(x), int(z)
+        ys = [by for (bx, by, bz) in self.blocks.keys() if bx == ix and bz == iz]
+        return max(ys) if ys else None
+
+    def place_tree(
+        self,
+        x: int,
+        base_y: int,
+        z: int,
+        trunk_color: tuple[int, int, int] | VoxelMaterial = VoxelMaterial((175, 138, 92), (112, 74, 42), (175, 138, 92)),
+        leaf_color: tuple[int, int, int] | VoxelMaterial = (34, 175, 85),
+        height: int = 4,
+    ) -> None:
+        """Place a Minecraft-style voxel tree with trunk and layered leaf canopy."""
+        tx, ty, tz = int(x), int(base_y), int(z)
+        h = max(2, int(height))
+        for dy in range(h):
+            self.set_block(tx, ty + dy, tz, trunk_color)
+        crown_base = ty + h - 1
+        for dy in (0, 1):
+            radius = 2 if dy == 0 else 1
+            for dx in range(-radius, radius + 1):
+                for dz in range(-radius, radius + 1):
+                    if dy == 0 and abs(dx) == 2 and abs(dz) == 2:
+                        continue
+                    if dx == 0 and dz == 0 and dy == 0:
+                        continue
+                    self.set_block(tx + dx, crown_base + dy, tz + dz, leaf_color)
+        self.set_block(tx, crown_base + 2, tz, leaf_color)
 
     def clear(self) -> None:
         self.blocks.clear()
@@ -134,13 +189,15 @@ class VoxelWorld:
         colors_list: list[tuple[int, int, int]] = []
 
         blocks_dict = self.blocks
-        for (bx, by, bz), color in blocks_dict.items():
+        for (bx, by, bz), mat in blocks_dict.items():
             offset = np.array([bx, by, bz], dtype=np.float32)
+            is_mat = isinstance(mat, VoxelMaterial)
             for (nx, ny, nz), unit_quad in _VOXEL_FACES:
                 if (bx + nx, by + ny, bz + nz) not in blocks_dict:
                     quads_list.append(unit_quad + offset)
                     normals_list.append((nx, ny, nz))
-                    colors_list.append(color)
+                    face_rgb = mat.color_for_normal((nx, ny, nz)) if is_mat else mat
+                    colors_list.append(face_rgb)
 
         if quads_list:
             self._cached_quads = np.asarray(quads_list, dtype=np.float32)
@@ -195,12 +252,14 @@ class VoxelWorld:
             pos = (vx, vy, vz)
             if pos in self.blocks:
                 adj = (vx + last_normal[0], vy + last_normal[1], vz + last_normal[2])
+                raw_mat = self.blocks[pos]
+                hit_rgb = raw_mat.color_for_normal(last_normal) if isinstance(raw_mat, VoxelMaterial) else raw_mat
                 return VoxelHit(
                     block_pos=pos,
                     face_normal=last_normal,
                     adjacent_pos=adj,
                     distance=dist,
-                    color=self.blocks[pos],
+                    color=hit_rgb,
                 )
 
             if t_max_x < t_max_y:

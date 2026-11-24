@@ -50,6 +50,45 @@ class Renderer3D:
         self.fog: Fog3D = fog if fog is not None else Fog3D(enabled=True)
         self.voxel_outline_color: tuple[int, int, int] | None = voxel_outline_color
         self.last_rendered_faces: int = 0
+        self._sky_cache_key = None
+        self._sky_cache_surf: pygame.Surface | None = None
+
+    def draw_sky_gradient(
+        self,
+        screen: pygame.Surface,
+        camera: Camera3D,
+        zenith_color: tuple[int, int, int] = (14, 24, 54),
+        horizon_color: tuple[int, int, int] = (48, 88, 148),
+        ground_color: tuple[int, int, int] = (10, 16, 28),
+    ) -> None:
+        """Draw a dynamic 3D sky & horizon gradient that shifts smoothly with camera.pitch."""
+        w, h = screen.get_size()
+        horizon_y = int(h * 0.5 + math.sin(camera.pitch) * h * 0.55)
+        horizon_y = max(-h, min(h * 2, horizon_y))
+
+        cache_key = (w, h, horizon_y // 4, zenith_color, horizon_color, ground_color)
+        if self._sky_cache_key != cache_key or self._sky_cache_surf is None:
+            surf = pygame.Surface((w, h))
+            step = 4
+            for y in range(0, h, step):
+                if y <= horizon_y:
+                    t = max(0.0, min(1.0, (horizon_y - y) / max(1.0, h * 0.65)))
+                    c = (
+                        int(horizon_color[0] + (zenith_color[0] - horizon_color[0]) * t),
+                        int(horizon_color[1] + (zenith_color[1] - horizon_color[1]) * t),
+                        int(horizon_color[2] + (zenith_color[2] - horizon_color[2]) * t),
+                    )
+                else:
+                    t = max(0.0, min(1.0, (y - horizon_y) / max(1.0, h * 0.45)))
+                    c = (
+                        int(horizon_color[0] + (ground_color[0] - horizon_color[0]) * t),
+                        int(horizon_color[1] + (ground_color[1] - horizon_color[1]) * t),
+                        int(horizon_color[2] + (ground_color[2] - horizon_color[2]) * t),
+                    )
+                pygame.draw.rect(surf, c, (0, y, w, step))
+            self._sky_cache_key = cache_key
+            self._sky_cache_surf = surf
+        screen.blit(self._sky_cache_surf, (0, 0))
 
     def _project_point_list(
         self,
@@ -113,7 +152,11 @@ class Renderer3D:
                     z_vals = q_cam[:, :, 2]
                     max_z = np.max(z_vals, axis=1)
                     min_z = np.min(z_vals, axis=1)
-                    depth_mask = (max_z >= near_z) & (min_z <= far_z)
+                    # Horizontal frustum pre-culling with generous margin for block size
+                    x_vals = q_cam[:, :, 0]
+                    max_x_allow = np.maximum(max_z, 1.0) * ((half_w / proj_scale) + 0.6) + 1.5
+                    in_horiz = (np.min(x_vals, axis=1) <= max_x_allow) & (np.max(x_vals, axis=1) >= -max_x_allow)
+                    depth_mask = (max_z >= near_z) & (min_z <= far_z) & in_horiz
 
                     if np.any(depth_mask):
                         q_cam = q_cam[depth_mask]
@@ -126,7 +169,17 @@ class Renderer3D:
                         depths = np.linalg.norm(cam_centers, axis=1)
 
                         intensities = self.light.compute_intensities(n_vis, cent_vis)
-                        lit_colors = c_vis * intensities[:, None]
+                        # Minecraft-style directional face contrast (top brightest, E/W slightly cooler, bottom darker)
+                        face_bias = np.where(
+                            n_vis[:, 1] > 0.5,
+                            1.06,
+                            np.where(
+                                n_vis[:, 1] < -0.5,
+                                0.65,
+                                np.where(np.abs(n_vis[:, 0]) > 0.5, 0.84, 0.94),
+                            ),
+                        ).astype(np.float32)
+                        lit_colors = c_vis * (intensities * face_bias)[:, None]
                         final_colors = self.fog.apply_to_colors(lit_colors, depths).astype(np.int32)
 
                         # Bulk project quads that are completely in front of near_z

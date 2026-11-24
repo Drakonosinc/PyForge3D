@@ -24,6 +24,7 @@ from pyforge3d import (
     Scene3D,
     Transform3D,
     VoxelPhysicsBody,
+    VoxelMaterial,
     VoxelWorld,
     clip_polygon_near_plane,
     compute_face_normals,
@@ -189,6 +190,28 @@ class TestPyForge3D(unittest.TestCase):
         renderer.light = pt_light
         faces_drawn_pt = renderer.render_scene(self.screen, cam, scene=scene, voxel_world=world)
         self.assertEqual(faces_drawn_pt, faces_drawn)
+
+    def test_07_voxel_material_trees_sky_and_projection(self) -> None:
+        world = VoxelWorld()
+        grass = VoxelMaterial(top=(56, 189, 78), side=(130, 92, 58), bottom=(105, 72, 42))
+        world.set_block(2, 0, 2, grass)
+        world.place_tree(2, 1, 2, height=3)
+        self.assertGreaterEqual(world.get_highest_solid_y(2, 2), 4)
+
+        cam = Camera3D(position=(2.5, 4.0, -4.0), yaw=0.0, pitch=-0.2)
+        proj = cam.project_world_point((2.5, 1.5, 2.5), 800, 600)
+        self.assertIsNotNone(proj)
+        assert proj is not None
+        self.assertGreater(proj[2], 0.5)
+
+        body = VoxelPhysicsBody(position=(2.5, 2.0, 2.5))
+        self.assertTrue(body.intersects_block(2, 2, 2))
+        self.assertFalse(body.intersects_block(5, 5, 5))
+
+        renderer = Renderer3D(800, 600)
+        renderer.draw_sky_gradient(self.screen, cam)
+        drawn = renderer.render_scene(self.screen, cam, voxel_world=world)
+        self.assertGreater(drawn, 5)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from .math import (
 from .meshes import Mesh3D, OBJLoader, Primitives
 from .physics import AABB3D, VoxelPhysicsBody
 from .renderer import Renderer3D, Scene3D
-from .voxels import VoxelHit, VoxelWorld
+from .voxels import VoxelHit, VoxelMaterial, VoxelWorld
 
 __all__ = [
     "__version__",
@@ -34,6 +34,7 @@ __all__ = [
     "Scene3D",
     "Transform3D",
     "VoxelHit",
+    "VoxelMaterial",
     "VoxelPhysicsBody",
     "VoxelWorld",
     "clip_polygon_near_plane",

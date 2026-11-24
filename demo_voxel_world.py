@@ -23,6 +23,7 @@ def main() -> None:
 
     camera = Camera3D(position=(5.0, 6.5, -5.5), yaw=0.0, pitch=-0.42, fov=72.0)
     controller = FirstPersonController(camera, move_speed=7.0)
+    controller.set_mouse_capture(True)
 
     renderer = Renderer3D(
         width=width,
@@ -56,16 +57,24 @@ def main() -> None:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif controller.handle_event(event):
+                continue
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    running = False
+                    if controller.mouse_captured:
+                        controller.set_mouse_capture(False)
+                    else:
+                        running = False
                 elif event.key == pygame.K_TAB:
                     selected_color_idx = (selected_color_idx + 1) % len(palette)
-            elif event.type == pygame.MOUSEBUTTONDOWN and hit is not None:
-                if event.button == 1:  # Left click: Break block
-                    world.remove_block(*hit.block_pos)
-                elif event.button == 3:  # Right click: Place block
-                    world.set_block(*hit.adjacent_pos, color=palette[selected_color_idx])
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if not controller.mouse_captured:
+                    controller.set_mouse_capture(True)
+                elif hit is not None:
+                    if event.button == 1:  # Left click: Break block
+                        world.remove_block(*hit.block_pos)
+                    elif event.button == 3:  # Right click: Place block
+                        world.set_block(*hit.adjacent_pos, color=palette[selected_color_idx])
 
         controller.update(dt, fly_mode=True)
         crystal.transform.rotation_y += 1.4 * dt
