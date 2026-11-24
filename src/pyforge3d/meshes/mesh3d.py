@@ -4,12 +4,24 @@ import math
 from typing import Sequence
 import numpy as np
 from ..math.transforms import Transform3D
+from ..textures.texture2d import Texture2D
+
+
+_CANONICAL_QUAD_UV = np.array(
+    [
+        [0.0, 1.0],
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+    ],
+    dtype=np.float32,
+)
 
 
 class Mesh3D:
     """
     Represents a 3D polygonal mesh with local vertices (V, 3), polygonal faces (triangles or quads),
-    per-face RGB colors, and a Transform3D for world-space positioning, rotation, and scaling.
+    per-face RGB colors, optional per-face Texture2D + UVs, alpha translucency, and a Transform3D.
     """
 
     def __init__(
@@ -23,6 +35,9 @@ class Mesh3D:
         wireframe: bool = False,
         outline_color: tuple[int, int, int] | None = None,
         backface_culling: bool = True,
+        face_textures: Sequence[Texture2D | None] | Texture2D | None = None,
+        face_uvs: Sequence[np.ndarray | Sequence[Sequence[float]] | None] | None = None,
+        alpha: int = 255,
     ) -> None:
         self.vertices: np.ndarray = np.asarray(vertices, dtype=np.float32)
         if self.vertices.ndim != 2 or self.vertices.shape[1] != 3:
@@ -61,6 +76,30 @@ class Mesh3D:
         self.outline_color: tuple[int, int, int] | None = outline_color
         self.backface_culling: bool = bool(backface_culling)
         self.visible: bool = True
+        self.alpha: int = max(0, min(255, int(alpha)))
+
+        if isinstance(face_textures, Texture2D):
+            self.face_textures: list[Texture2D | None] = [face_textures] * num_faces
+        elif face_textures is not None:
+            ft_list = list(face_textures)
+            if len(ft_list) < num_faces:
+                ft_list.extend([None] * (num_faces - len(ft_list)))
+            self.face_textures = ft_list[:num_faces]
+        else:
+            self.face_textures = [None] * num_faces
+
+        if face_uvs is not None:
+            uv_list: list[np.ndarray | None] = [
+                np.asarray(u, dtype=np.float32) if u is not None else None for u in face_uvs
+            ]
+            if len(uv_list) < num_faces:
+                uv_list.extend([None] * (num_faces - len(uv_list)))
+            self.face_uvs: list[np.ndarray | None] = uv_list[:num_faces]
+        else:
+            self.face_uvs = [
+                _CANONICAL_QUAD_UV if (self.face_textures[i] is not None and len(self.faces[i]) == 4) else None
+                for i in range(num_faces)
+            ]
 
     def get_world_vertices(self) -> np.ndarray:
         """Return (V, 3) vertices transformed into world space."""
@@ -179,6 +218,34 @@ class Primitives:
             rotation=rotation,
             outline_color=outline_color,
         )
+
+    @staticmethod
+    def textured_cube(
+        size: float | tuple[float, float, float] = 1.0,
+        top_texture: Texture2D | None = None,
+        side_texture: Texture2D | None = None,
+        bottom_texture: Texture2D | None = None,
+        color: tuple[int, int, int] | None = None,
+        position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        rotation: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        alpha: int = 255,
+    ) -> Mesh3D:
+        """Create a 6-face textured 3D cube mesh (e.g. rotating props, pickups, dropped blocks, crates)."""
+        s_tex = side_texture if side_texture is not None else top_texture
+        b_tex = bottom_texture if bottom_texture is not None else s_tex
+        t_tex = top_texture if top_texture is not None else s_tex
+
+        fallback_col = (
+            color
+            if color is not None
+            else (t_tex.avg_color if t_tex is not None else (200, 200, 200))
+        )
+        mesh = Primitives.cube(size=size, color=fallback_col, position=position, rotation=rotation)
+        # Face order in Primitives.cube: Front(-Z), Back(+Z), Right(+X), Left(-X), Top(+Y), Bottom(-Y)
+        mesh.face_textures = [s_tex, s_tex, s_tex, s_tex, t_tex, b_tex]
+        mesh.face_uvs = [_CANONICAL_QUAD_UV] * 6
+        mesh.alpha = max(0, min(255, int(alpha)))
+        return mesh
 
     @staticmethod
     def pyramid(

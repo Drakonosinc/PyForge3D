@@ -9,8 +9,9 @@ from ..lighting.sky_dome import SkyDome3D
 from ..math.transforms import clip_polygon_near_plane, compute_face_normals
 from ..meshes.mesh3d import Mesh3D
 from ..textures.atlas import TextureAtlas
+from ..textures.texture2d import Texture2D
 from ..voxels.chunked_world import ChunkedVoxelWorld
-from ..voxels.voxel_world import VoxelHit, VoxelWorld
+from ..voxels.voxel_world import VoxelHit, VoxelWorld, _VOXEL_FACES
 from .native_bridge import HAS_NATIVE_RASTERIZER, NATIVE_LIB
 from .rasterizer import CANONICAL_QUAD_UV, SoftwareTexturedRasterizer, clip_textured_polygon_near_plane
 
@@ -162,10 +163,11 @@ class Renderer3D:
         voxel_world: VoxelWorld | ChunkedVoxelWorld | None = None,
         highlight_hit: VoxelHit | None = None,
         sky_dome: SkyDome3D | None = None,
+        block_overlays: dict[tuple[int, int, int], Texture2D] | None = None,
     ) -> int:
         """
         Render both a `VoxelWorld` / `ChunkedVoxelWorld` and a `Scene3D` of `Mesh3D` instances onto `screen`.
-        Automatically selects the high-speed native C99 Z-Buffer pipeline when `self.textured=True` and available.
+        Optional `block_overlays` maps `(bx, by, bz) -> Texture2D` for Z-buffered voxel decals (e.g. damage cracks).
         """
         if self.textured:
             if self.native_active:
@@ -176,6 +178,7 @@ class Renderer3D:
                     voxel_world=voxel_world,
                     highlight_hit=highlight_hit,
                     sky_dome=sky_dome,
+                    block_overlays=block_overlays,
                 )
             return self._render_scene_textured_numpy(
                 screen,
@@ -184,6 +187,7 @@ class Renderer3D:
                 voxel_world=voxel_world,
                 highlight_hit=highlight_hit,
                 sky_dome=sky_dome,
+                block_overlays=block_overlays,
             )
         if sky_dome is not None:
             sky_dome.draw(screen, camera)
@@ -220,6 +224,7 @@ class Renderer3D:
         voxel_world: VoxelWorld | ChunkedVoxelWorld | None = None,
         highlight_hit: VoxelHit | None = None,
         sky_dome: SkyDome3D | None = None,
+        block_overlays: dict[tuple[int, int, int], Texture2D] | None = None,
     ) -> int:
         """
         Zero-copy SDL + Single-Call C99 Batched Scanline Z-Buffer Pipeline.
@@ -427,14 +432,18 @@ class Renderer3D:
                                 straddle_op.append(entry)
                             total_faces += 1
 
-        # Prepare Scene3D Mesh3D polygons (vectorized fast normals!)
+        # Prepare Scene3D Mesh3D polygons (supports both solid & textured Mesh3D!)
         mesh_polys: list[tuple] = []
+        mesh_tr_polys: list[tuple] = []
         if scene is not None and scene.meshes:
             for mesh in scene.meshes:
                 if not mesh.visible or len(mesh.faces) == 0:
                     continue
                 verts_w = mesh.get_world_vertices()
                 verts_c = (verts_w - cam_pos[None, :]) @ view_mat
+                mesh_alp = int(getattr(mesh, "alpha", 255))
+                face_textures = getattr(mesh, "face_textures", None)
+                face_uvs = getattr(mesh, "face_uvs", None)
 
                 for f_idx, face in enumerate(mesh.faces):
                     poly_w = verts_w[list(face)]
@@ -448,8 +457,17 @@ class Renderer3D:
                     z_c = poly_c[:, 2]
                     if float(np.max(z_c)) < near_z or float(np.min(z_c)) > far_z:
                         continue
+
+                    f_tex = face_textures[f_idx] if face_textures is not None else None
+                    f_uv = face_uvs[f_idx] if face_uvs is not None else None
+                    if f_tex is not None and f_uv is None and len(poly_c) == 4:
+                        f_uv = CANONICAL_QUAD_UV
+
                     if float(np.min(z_c)) < near_z:
-                        poly_c = clip_polygon_near_plane(poly_c, near_z)
+                        if f_tex is not None and f_uv is not None:
+                            poly_c, f_uv = clip_textured_polygon_near_plane(poly_c, f_uv, near_z)
+                        else:
+                            poly_c = clip_polygon_near_plane(poly_c, near_z)
                         if len(poly_c) < 3 or len(poly_c) > 8:
                             continue
 
@@ -463,21 +481,101 @@ class Renderer3D:
 
                     base_rgb = mesh.face_colors[f_idx]
                     intensity = float(self.light.compute_intensities(normal_w, center_w)[0])
+                    fog_f_m = min(1.0, max(0.0, (d_val - fog_near) / fog_span)) if fog_enabled else 0.0
                     shaded = self.fog.apply_to_colors(base_rgb * intensity, np.array([d_val], dtype=np.float32))
-                    mesh_polys.append((
+
+                    if f_tex is not None and f_uv is not None:
+                        tid_m = atlas.register(f_tex)
+                        u_a = np.ascontiguousarray(f_uv[:, 0], dtype=np.float32)
+                        v_a = np.ascontiguousarray(f_uv[:, 1], dtype=np.float32)
+                        is_tr_m = (mesh_alp < 255) or f_tex.has_cutout
+                        entry_m = (
+                            d_val,
+                            np.ascontiguousarray(px_a),
+                            np.ascontiguousarray(py_a),
+                            np.ascontiguousarray(iz_a),
+                            u_a,
+                            v_a,
+                            len(poly_c),
+                            tid_m,
+                            max(0.25, min(1.25, intensity * 1.05)),
+                            fog_f_m,
+                            int(shaded[0]),
+                            int(shaded[1]),
+                            int(shaded[2]),
+                            mesh_alp,
+                        )
+                        if is_tr_m:
+                            mesh_tr_polys.append(entry_m)
+                        else:
+                            mesh_polys.append(entry_m)
+                    else:
+                        entry_m = (
+                            d_val,
+                            np.ascontiguousarray(px_a),
+                            np.ascontiguousarray(py_a),
+                            np.ascontiguousarray(iz_a),
+                            None,
+                            None,
+                            len(poly_c),
+                            -1,
+                            1.0,
+                            0.0,
+                            int(shaded[0]),
+                            int(shaded[1]),
+                            int(shaded[2]),
+                            mesh_alp,
+                        )
+                        if mesh_alp < 255:
+                            mesh_tr_polys.append(entry_m)
+                        else:
+                            mesh_polys.append(entry_m)
+                    total_faces += 1
+
+        # Prepare Z-buffered Voxel Block Overlays / Decals (e.g. damage cracks, frost, runes)
+        if block_overlays:
+            pad = 0.008
+            for (bx, by, bz), ov_tex in block_overlays.items():
+                if ov_tex is None:
+                    continue
+                tid_ov = atlas.register(ov_tex)
+                base_off = np.array([float(bx), float(by), float(bz)], dtype=np.float32)
+                for (nx, ny, nz), unit_quad in _VOXEL_FACES:
+                    n_vec = np.array([float(nx), float(ny), float(nz)], dtype=np.float32)
+                    q_w = unit_quad + base_off[None, :] + n_vec[None, :] * pad
+                    cent_w = q_w.mean(axis=0)
+                    if float(np.dot(n_vec, cent_w - cam_pos)) >= -1e-5:
+                        continue
+                    q_c = (q_w - cam_pos[None, :]) @ view_mat
+                    z_c = q_c[:, 2]
+                    if float(np.max(z_c)) < near_z or float(np.min(z_c)) > far_z:
+                        continue
+                    ov_uv = CANONICAL_QUAD_UV
+                    if float(np.min(z_c)) < near_z:
+                        q_c, ov_uv = clip_textured_polygon_near_plane(q_c, ov_uv, near_z)
+                        if len(q_c) < 3 or len(q_c) > 8:
+                            continue
+                    d_val = float(np.linalg.norm(q_c.mean(axis=0)))
+                    z_s = np.maximum(q_c[:, 2], near_z * 0.5)
+                    iz_a = (1.0 / z_s).astype(np.float32)
+                    px_a = (half_w + q_c[:, 0] * iz_a * proj_scale).astype(np.float32)
+                    py_a = (half_h - q_c[:, 1] * iz_a * proj_scale).astype(np.float32)
+                    if float(px_a.max()) < 0.0 or float(px_a.min()) >= rw or float(py_a.max()) < 0.0 or float(py_a.min()) >= rh:
+                        continue
+                    straddle_tr.append((
                         d_val,
                         np.ascontiguousarray(px_a),
                         np.ascontiguousarray(py_a),
                         np.ascontiguousarray(iz_a),
-                        None,
-                        None,
-                        len(poly_c),
-                        -1,
+                        np.ascontiguousarray(ov_uv[:, 0], dtype=np.float32),
+                        np.ascontiguousarray(ov_uv[:, 1], dtype=np.float32),
+                        len(q_c),
+                        tid_ov,
                         1.0,
                         0.0,
-                        int(shaded[0]),
-                        int(shaded[1]),
-                        int(shaded[2]),
+                        255,
+                        255,
+                        255,
                         255,
                     ))
                     total_faces += 1
@@ -521,11 +619,13 @@ class Renderer3D:
 
             if mesh_polys:
                 mesh_polys.sort(key=lambda e: e[0])
-                for _, px_a, py_a, iz_a, _u, _v, nv, tid, sh, ff, sr, sg, sb, alp in mesh_polys:
+                for _, px_a, py_a, iz_a, u_a, v_a, nv, tid, sh, ff, sr, sg, sb, alp in mesh_polys:
                     NATIVE_LIB.pf3d_rasterize_polygon(
                         fb_ptr, pitch, z_ptr, rw, rh, r_off, g_off, b_off,
                         px_a.ctypes.data, py_a.ctypes.data, iz_a.ctypes.data,
-                        0, 0, nv, tid, sh, ff,
+                        u_a.ctypes.data if u_a is not None else 0,
+                        v_a.ctypes.data if v_a is not None else 0,
+                        nv, tid, sh, ff,
                         fog_r, fog_g, fog_b, sr, sg, sb, alp,
                         a_rgb_ptr, a_alp_ptr, a_off_ptr, a_w_ptr, a_h_ptr, a_cut_ptr,
                     )
@@ -542,13 +642,17 @@ class Renderer3D:
                     tr_order.ctypes.data, int(len(tr_order)),
                 )
 
+            if mesh_tr_polys:
+                straddle_tr.extend(mesh_tr_polys)
             if straddle_tr:
                 straddle_tr.sort(key=lambda e: e[0], reverse=True)
                 for _, px_a, py_a, iz_a, u_a, v_a, nv, tid, sh, ff, sr, sg, sb, alp in straddle_tr:
                     NATIVE_LIB.pf3d_rasterize_polygon(
                         fb_ptr, pitch, z_ptr, rw, rh, r_off, g_off, b_off,
                         px_a.ctypes.data, py_a.ctypes.data, iz_a.ctypes.data,
-                        u_a.ctypes.data, v_a.ctypes.data, nv, tid, sh, ff,
+                        u_a.ctypes.data if u_a is not None else 0,
+                        v_a.ctypes.data if v_a is not None else 0,
+                        nv, tid, sh, ff,
                         fog_r, fog_g, fog_b, sr, sg, sb, alp,
                         a_rgb_ptr, a_alp_ptr, a_off_ptr, a_w_ptr, a_h_ptr, a_cut_ptr,
                     )
@@ -576,6 +680,7 @@ class Renderer3D:
         voxel_world: VoxelWorld | ChunkedVoxelWorld | None = None,
         highlight_hit: VoxelHit | None = None,
         sky_dome: SkyDome3D | None = None,
+        block_overlays: dict[tuple[int, int, int], Texture2D] | None = None,
     ) -> int:
         """100% Pure-NumPy portable fallback Z-Buffer textured pipeline (used when C99 binary is unavailable/disabled)."""
         scr_w, scr_h = screen.get_size()
@@ -763,6 +868,9 @@ class Renderer3D:
                     continue
                 verts_w = mesh.get_world_vertices()
                 verts_c = (verts_w - cam_pos[None, :]) @ view_mat
+                mesh_alp = int(getattr(mesh, "alpha", 255))
+                face_textures = getattr(mesh, "face_textures", None)
+                face_uvs = getattr(mesh, "face_uvs", None)
 
                 for f_idx, face in enumerate(mesh.faces):
                     poly_w = verts_w[list(face)]
@@ -776,8 +884,17 @@ class Renderer3D:
                     z_c = poly_c[:, 2]
                     if float(np.max(z_c)) < near_z or float(np.min(z_c)) > far_z:
                         continue
+
+                    f_tex = face_textures[f_idx] if face_textures is not None else None
+                    f_uv = face_uvs[f_idx] if face_uvs is not None else None
+                    if f_tex is not None and f_uv is None and len(poly_c) == 4:
+                        f_uv = CANONICAL_QUAD_UV
+
                     if float(np.min(z_c)) < near_z:
-                        poly_c = clip_polygon_near_plane(poly_c, near_z)
+                        if f_tex is not None and f_uv is not None:
+                            poly_c, f_uv = clip_textured_polygon_near_plane(poly_c, f_uv, near_z)
+                        else:
+                            poly_c = clip_polygon_near_plane(poly_c, near_z)
                         if len(poly_c) < 3:
                             continue
 
@@ -790,9 +907,52 @@ class Renderer3D:
 
                     base_rgb = mesh.face_colors[f_idx]
                     intensity = float(self.light.compute_intensities(normal_w, center_w)[0])
+                    fog_f_m = min(1.0, max(0.0, (d_val - fog_near) / fog_span)) if fog_enabled else 0.0
                     shaded = self.fog.apply_to_colors(base_rgb * intensity, np.array([d_val], dtype=np.float32))
                     rgb_tuple = (int(shaded[0]), int(shaded[1]), int(shaded[2]))
-                    opaque_items.append((d_val, pts_invz, None, None, rgb_tuple, 1.0, 0.0, 255, False))
+                    if f_tex is not None and f_uv is not None:
+                        uv_l = [(float(u[0]), float(u[1])) for u in f_uv]
+                        item_m = (d_val, pts_invz, uv_l, f_tex, rgb_tuple, max(0.25, min(1.25, intensity * 1.05)), fog_f_m, mesh_alp, False)
+                        if mesh_alp < 255 or f_tex.has_cutout:
+                            translucent_items.append(item_m)
+                        else:
+                            opaque_items.append(item_m)
+                    else:
+                        item_m = (d_val, pts_invz, None, None, rgb_tuple, 1.0, 0.0, mesh_alp, False)
+                        if mesh_alp < 255:
+                            translucent_items.append(item_m)
+                        else:
+                            opaque_items.append(item_m)
+
+        if block_overlays:
+            pad = 0.008
+            for (bx, by, bz), ov_tex in block_overlays.items():
+                if ov_tex is None:
+                    continue
+                base_off = np.array([float(bx), float(by), float(bz)], dtype=np.float32)
+                for (nx, ny, nz), unit_quad in _VOXEL_FACES:
+                    n_vec = np.array([float(nx), float(ny), float(nz)], dtype=np.float32)
+                    q_w = unit_quad + base_off[None, :] + n_vec[None, :] * pad
+                    cent_w = q_w.mean(axis=0)
+                    if float(np.dot(n_vec, cent_w - cam_pos)) >= -1e-5:
+                        continue
+                    q_c = (q_w - cam_pos[None, :]) @ view_mat
+                    z_c = q_c[:, 2]
+                    if float(np.max(z_c)) < near_z or float(np.min(z_c)) > far_z:
+                        continue
+                    ov_uv = CANONICAL_QUAD_UV
+                    if float(np.min(z_c)) < near_z:
+                        q_c, ov_uv = clip_textured_polygon_near_plane(q_c, ov_uv, near_z)
+                        if len(q_c) < 3:
+                            continue
+                    d_val = float(np.linalg.norm(q_c.mean(axis=0)))
+                    pts_invz = self._project_point_list_invz(q_c, proj_scale, half_w, half_h, near_z)
+                    xs = [p[0] for p in pts_invz]
+                    ys = [p[1] for p in pts_invz]
+                    if max(xs) < 0.0 or min(xs) >= rw or max(ys) < 0.0 or min(ys) >= rh:
+                        continue
+                    uv_l = [(float(u[0]), float(u[1])) for u in ov_uv]
+                    translucent_items.append((d_val, pts_invz, uv_l, ov_tex, (255, 255, 255), 1.0, 0.0, 255, False))
 
         draw_poly = rast.draw_planar_polygon
         opaque_items.sort(key=lambda it: it[0])

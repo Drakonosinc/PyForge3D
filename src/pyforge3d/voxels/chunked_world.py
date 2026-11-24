@@ -167,6 +167,52 @@ class ChunkedVoxelWorld:
         self._overrides.clear()
         self._aggregate_dirty = True
 
+    def export_overrides(self, material_to_id: Callable[[Any], str | int]) -> list[list[Any]]:
+        """
+        Export all persistent user edits & deletions as a JSON-friendly list of `[x, y, z, id_or_None]`.
+        Allows saving infinite procedural worlds compactly without storing untouched chunks.
+        """
+        out: list[list[Any]] = []
+        for (bx, by, bz), mat in self._overrides.items():
+            out.append([int(bx), int(by), int(bz), None if mat is None else material_to_id(mat)])
+        return out
+
+    def import_overrides(
+        self,
+        records: list[list[Any]],
+        id_to_material: Callable[[str | int], Any],
+    ) -> int:
+        """
+        Restore persistent user edits from `export_overrides()` records.
+        Applies edits immediately to any loaded chunks and saves them for chunks loaded later.
+        Returns the number of overrides restored.
+        """
+        count = 0
+        for rec in records:
+            if len(rec) < 4:
+                continue
+            bx, by, bz, mat_id = int(rec[0]), int(rec[1]), int(rec[2]), rec[3]
+            if mat_id is None:
+                self._overrides[(bx, by, bz)] = None
+                ch = self.chunks.get(self._chunk_coords(bx, bz))
+                if ch is not None:
+                    ch.blocks.pop((bx, by, bz), None)
+                    ch.modified_by_user = True
+                    self._mark_dirty_with_neighbors(bx, bz)
+            else:
+                mat = id_to_material(mat_id)
+                if mat is None:
+                    continue
+                self._overrides[(bx, by, bz)] = mat
+                ch = self.chunks.get(self._chunk_coords(bx, bz))
+                if ch is not None:
+                    ch.blocks[(bx, by, bz)] = mat
+                    ch.modified_by_user = True
+                    self._mark_dirty_with_neighbors(bx, bz)
+            count += 1
+        self._aggregate_dirty = True
+        return count
+
     def generate_chunk(self, cx: int, cz: int) -> Chunk3D:
         key = (int(cx), int(cz))
         existing = self.chunks.get(key)

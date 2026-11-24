@@ -453,6 +453,50 @@ class TestPyForge3D(unittest.TestCase):
         mean_diff = float(np.abs(arr_nat - arr_np).mean())
         self.assertLess(mean_diff, 4.0)
 
+    def test_14_textured_mesh_voxel_overlays_and_serialization(self) -> None:
+        # 1. Textured Mesh3D (Primitives.textured_cube) & Voxel Block Overlays in BOTH C99 and NumPy backends
+        top_tex = Texture2D(np.full((16, 16, 3), (80, 185, 70), dtype=np.uint8))
+        side_tex = Texture2D(np.full((16, 16, 3), (140, 100, 65), dtype=np.uint8))
+        crack_rgba = np.zeros((16, 16, 4), dtype=np.uint8)
+        crack_rgba[4:12, 7:9] = (15, 15, 15, 210)
+        crack_rgba[7:9, 4:12] = (15, 15, 15, 210)
+        crack_tex = Texture2D(crack_rgba)
+        self.assertTrue(crack_tex.has_cutout)
+
+        mini_cube = Primitives.textured_cube(size=0.35, top_texture=top_tex, side_texture=side_tex, position=(1.5, 1.8, 2.5))
+        self.assertEqual(len(mini_cube.face_textures), 6)
+        scene = Scene3D()
+        scene.add_mesh(mini_cube)
+
+        mat = VoxelMaterial(top_texture=top_tex, side_texture=side_tex, bottom_texture=side_tex, name="Block")
+        world = ChunkedVoxelWorld(chunk_size=8)
+        world.set_block(1, 0, 2, mat)
+        world.set_block(2, 0, 2, mat)
+        world.remove_block(2, 0, 2)
+
+        cam = Camera3D(position=(0.2, 2.4, -1.2), fov=72.0)
+        cam.look_at((1.5, 1.0, 2.5))
+        overlays = {(1, 0, 2): crack_tex}
+        surfs = []
+        for use_native in (True, False):
+            surf = pygame.Surface((320, 200), depth=32)
+            rend = Renderer3D(320, 200, textured=True, render_scale=0.5, use_native=use_native)
+            faces = rend.render_scene(surf, cam, scene=scene, voxel_world=world, block_overlays=overlays)
+            self.assertGreaterEqual(faces, 7)
+            surfs.append(pygame.surfarray.array3d(surf).astype(np.int16))
+        self.assertLess(float(np.abs(surfs[0] - surfs[1]).mean()), 4.0)
+
+        # 2. ChunkedVoxelWorld override export / import round-trip
+        records = world.export_overrides(lambda m: m.name)
+        self.assertEqual(len(records), 2)
+
+        world2 = ChunkedVoxelWorld(chunk_size=8)
+        restored = world2.import_overrides(records, lambda name: mat if name == "Block" else None)
+        self.assertEqual(restored, 2)
+        world2.generate_chunk(0, 0)
+        self.assertEqual(world2.get_block(1, 0, 2), mat)
+        self.assertFalse(world2.has_block(2, 0, 2))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

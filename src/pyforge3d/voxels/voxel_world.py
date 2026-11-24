@@ -194,6 +194,24 @@ class VoxelWorld:
         self.blocks.clear()
         self._dirty = True
 
+    def export_blocks(self, material_to_id) -> list[list[Any]]:
+        """Export all blocks as JSON-friendly `[x, y, z, material_id]` records."""
+        return [[int(x), int(y), int(z), material_to_id(mat)] for (x, y, z), mat in self.blocks.items()]
+
+    def import_blocks(self, records: list[list[Any]], id_to_material) -> int:
+        """Load blocks from `export_blocks()` records, returning the number of imported blocks."""
+        self.clear()
+        count = 0
+        for rec in records:
+            if len(rec) < 4:
+                continue
+            mat = id_to_material(rec[3])
+            if mat is not None:
+                self.blocks[(int(rec[0]), int(rec[1]), int(rec[2]))] = mat
+                count += 1
+        self._dirty = True
+        return count
+
     def generate_flat_terrain(
         self,
         width: int = 8,
