@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyforge3d"
+version = "1.0.0"
+description = "Vectorized 3D Software Renderer, Voxel World Engine, 3D Meshes, Lighting, Raycasting, and AABB Physics library for Pygame."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Drakonosinc" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "pygame-ce>=2.4.0; python_version>='3.12'",
+    "numpy>=1.24.0",
+]
+keywords = [
+    "pygame",
+    "3d",
+    "voxel",
+    "minecraft",
+    "software-renderer",
+    "gamedev",
+    "raycasting",
+    "meshes",
+    "3d-graphics",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+]
+
+[project.urls]
+Homepage = "https://github.com/Drakonosinc/PyForge3D"
+Repository = "https://github.com/Drakonosinc/PyForge3D"
+Documentation = "https://deepwiki.com/Drakonosinc/PyForge3D"
+
+[tool.setuptools.packages.find]
+where = ["src"]
