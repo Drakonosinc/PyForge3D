@@ -66,6 +66,48 @@ class TextureAtlas:
             return self._textures[tid]
         return None
 
+    def update_texture(self, target: Texture2D, source: Texture2D | np.ndarray) -> bool:
+        """
+        Update a registered `Texture2D` in-place inside the packed atlas (ideal for animated
+        liquids, torches, screens, or live procedural textures with zero chunk rebuilds!).
+        """
+        tid = self._id_by_obj.get(id(target))
+        if isinstance(source, Texture2D):
+            src_rgb = source.rgb
+            src_alp = source.alpha
+        else:
+            arr = np.asarray(source, dtype=np.uint8)
+            if arr.ndim != 3 or arr.shape[2] not in (3, 4):
+                raise ValueError("source array must have shape (H, W, 3) or (H, W, 4).")
+            src_rgb = arr[:, :, :3]
+            src_alp = arr[:, :, 3] if arr.shape[2] == 4 else None
+
+        if src_rgb.shape[:2] != (target.height, target.width):
+            raise ValueError("Animated/updated texture dimensions must match the target Texture2D.")
+
+        np.copyto(target.rgb, src_rgb)
+        if src_alp is not None and target.alpha is not None:
+            np.copyto(target.alpha, src_alp)
+
+        if tid is None:
+            return False
+
+        n_texels = target.width * target.height
+        rgb_flat_src = np.ascontiguousarray(src_rgb.reshape(n_texels, 3), dtype=np.uint8)
+        self._rgb_chunks[tid] = rgb_flat_src
+        if src_alp is not None:
+            alp_flat_src = np.ascontiguousarray(src_alp.reshape(n_texels), dtype=np.uint8)
+            self._alpha_chunks[tid] = alp_flat_src
+        else:
+            alp_flat_src = None
+
+        if not self._dirty:
+            off = self._offsets[tid]
+            self.rgb_flat[off : off + n_texels] = rgb_flat_src
+            if alp_flat_src is not None:
+                self.alpha_flat[off : off + n_texels] = alp_flat_src
+        return True
+
     def ensure_packed(self) -> None:
         if not self._dirty:
             return

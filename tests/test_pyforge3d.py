@@ -601,6 +601,66 @@ class TestPyForge3D(unittest.TestCase):
             finally:
                 NATIVE_LIB.pf3d_set_num_threads(orig_t)
 
+    def test_17_3d_perlin_dynamic_lights_animated_atlas_and_textured_box(self) -> None:
+        from pyforge3d import FractalNoise3D, PerlinNoise3D, hash_3d
+
+        # 1. 3D hash scalar == array parity & 3D Perlin / Fractal noise range
+        xs = np.array([1, -7, 15], dtype=np.int64)
+        ys = np.array([2, 4, 9], dtype=np.int64)
+        zs = np.array([-3, 8, 22], dtype=np.int64)
+        h_arr = hash_3d(xs, ys, zs, seed=42)
+        for i in range(3):
+            self.assertAlmostEqual(float(hash_3d(int(xs[i]), int(ys[i]), int(zs[i]), seed=42)), float(h_arr[i]), places=6)
+
+        gx, gy, gz = np.meshgrid(np.arange(4, dtype=np.float32), np.arange(4, dtype=np.float32), np.arange(4, dtype=np.float32), indexing="ij")
+        p3 = PerlinNoise3D(seed=7).sample(gx * 0.25, gy * 0.25, gz * 0.25)
+        f3 = FractalNoise3D(seed=7, octaves=2, scale=8.0).sample(gx, gy, gz, normalized=True)
+        self.assertEqual(p3.shape, (4, 4, 4))
+        self.assertTrue(np.all((p3 >= -1.0) & (p3 <= 1.0)))
+        self.assertTrue(np.all((f3 >= 0.0) & (f3 <= 1.0)))
+        self.assertGreater(float(np.std(f3)), 0.02)
+
+        # 2. Primitives.textured_box with pivot_offset & live TextureAtlas.update_texture
+        t_red = Texture2D(np.full((8, 8, 3), (200, 40, 40), dtype=np.uint8))
+        t_blue = Texture2D(np.full((8, 8, 3), (40, 80, 220), dtype=np.uint8))
+        box = Primitives.textured_box(0.5, 1.0, 0.5, front_texture=t_red, side_texture=t_blue, pivot_offset=(0.0, -0.5, 0.0))
+        self.assertEqual(len(box.faces), 6)
+        self.assertAlmostEqual(float(box.vertices[:, 1].max()), 0.0, places=4)
+        self.assertAlmostEqual(float(box.vertices[:, 1].min()), -1.0, places=4)
+
+        # 3. Dynamic multi-point light illuminates dark voxel floor in both C99 and NumPy backends
+        floor_tex = Texture2D(np.full((8, 8, 3), (120, 120, 120), dtype=np.uint8))
+        mat = VoxelMaterial(top_texture=floor_tex, side_texture=floor_tex, bottom_texture=floor_tex, name="CaveStone")
+        world = ChunkedVoxelWorld(chunk_size=8, greedy_meshing=True)
+        for x in range(6):
+            for z in range(6):
+                world.set_block_raw(x, 0, z, mat)
+        cam = Camera3D(position=(3.0, 4.5, -2.5), yaw=0.0, pitch=-0.65, fov=70.0)
+        dark_light = DirectionalLight(direction=(0.0, -1.0, 0.0), ambient=0.18, diffuse=0.05)
+        torch = PointLight(position=(3.0, 1.6, 3.0), intensity=1.25, attenuation=0.08, radius=10.0)
+
+        for use_native in (True, False):
+            s_dark = pygame.Surface((240, 160), depth=32)
+            s_lit = pygame.Surface((240, 160), depth=32)
+            r = Renderer3D(240, 160, light=dark_light, textured=True, render_scale=0.5, use_native=use_native)
+            r.fog.enabled = False
+            r.render_scene(s_dark, cam, voxel_world=world)
+            r.render_scene(s_lit, cam, voxel_world=world, dynamic_lights=[torch])
+            dark_mean = float(pygame.surfarray.array3d(s_dark).mean())
+            lit_mean = float(pygame.surfarray.array3d(s_lit).mean())
+            self.assertGreater(lit_mean, dark_mean + 8.0)
+
+        # 4. In-place TextureAtlas.update_texture changes rendered frame without chunk rebuild!
+        world.atlas.ensure_packed()
+        updated = world.atlas.update_texture(floor_tex, np.full((8, 8, 3), (240, 180, 60), dtype=np.uint8))
+        self.assertTrue(updated)
+        s_anim = pygame.Surface((240, 160), depth=32)
+        r_anim = Renderer3D(240, 160, textured=True, render_scale=0.5, use_native=True)
+        r_anim.fog.enabled = False
+        r_anim.render_scene(s_anim, cam, voxel_world=world)
+        arr_anim = pygame.surfarray.array3d(s_anim)
+        self.assertGreater(float(arr_anim[:, :, 0].mean()), float(arr_anim[:, :, 2].mean()) + 15.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

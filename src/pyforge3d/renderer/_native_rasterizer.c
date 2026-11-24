@@ -1141,7 +1141,9 @@ PF3D_EXPORT int pf3d_render_voxel_chunks(
     const int32_t *tex_widths,
     const int32_t *tex_heights,
     const uint8_t *tex_cutout,
-    int clear_z
+    int clear_z,
+    int n_dyn_lights,
+    const float *dyn_lights     /* [n_dyn_lights * 6]: x, y, z, intensity, radius2, attenuation */
 ) {
     const float m00 = view_mat[0], m01 = view_mat[1], m02 = view_mat[2];
     const float m10 = view_mat[3], m11 = view_mat[4], m12 = view_mat[5];
@@ -1331,9 +1333,41 @@ PF3D_EXPORT int pf3d_render_voxel_chunks(
                 if (intensity > 1.2f) intensity = 1.2f;
             }
 
+            if (n_dyn_lights > 0 && dyn_lights != NULL) {
+                float q_min_x = q[0], q_max_x = q[0];
+                float q_min_y = q[1], q_max_y = q[1];
+                float q_min_z = q[2], q_max_z = q[2];
+                for (int k = 1; k < 4; ++k) {
+                    const float qkx = q[k * 3 + 0], qky = q[k * 3 + 1], qkz = q[k * 3 + 2];
+                    if (qkx < q_min_x) q_min_x = qkx; else if (qkx > q_max_x) q_max_x = qkx;
+                    if (qky < q_min_y) q_min_y = qky; else if (qky > q_max_y) q_max_y = qky;
+                    if (qkz < q_min_z) q_min_z = qkz; else if (qkz > q_max_z) q_max_z = qkz;
+                }
+                float local_boost = 0.0f;
+                for (int li = 0; li < n_dyn_lights; ++li) {
+                    const float *pl = dyn_lights + li * 6;
+                    const float sx = 0.5f * (cx + clamp_f(pl[0], q_min_x, q_max_x));
+                    const float sy = 0.5f * (cy + clamp_f(pl[1], q_min_y, q_max_y));
+                    const float sz = 0.5f * (cz_w + clamp_f(pl[2], q_min_z, q_max_z));
+                    const float dlx = pl[0] - sx;
+                    const float dly = pl[1] - sy;
+                    const float dlz = pl[2] - sz;
+                    const float dist2 = dlx * dlx + dly * dly + dlz * dlz;
+                    const float r2 = pl[4];
+                    if (dist2 >= r2) continue;
+                    const float falloff = 1.0f - (dist2 / r2);
+                    const float att = 1.0f / (1.0f + pl[5] * dist2);
+                    const float inv_d = 1.0f / (sqrtf(dist2) + 1e-4f);
+                    float nd = (nx * dlx + ny * dly + nz * dlz) * inv_d;
+                    if (nd < 0.0f) nd = 0.0f;
+                    local_boost += pl[3] * falloff * att * (0.45f + 0.55f * nd);
+                }
+                intensity += local_boost;
+            }
+
             const float face_bias = (ny > 0.5f) ? 1.06f
                 : ((ny < -0.5f) ? 0.64f : ((fabsf(nx) > 0.5f) ? 0.84f : 0.94f));
-            const float shade = clamp_f(intensity * face_bias * ao_arr[fi] + emissive[fi], 0.15f, 1.35f);
+            const float shade = clamp_f(intensity * face_bias * ao_arr[fi] + emissive[fi], 0.15f, 1.45f);
             const float ff = fog_enabled ? clamp_f((depth - fog_near) * fog_inv_span, 0.0f, 1.0f) : 0.0f;
             const float sh_inv_ff = shade * (1.0f - ff);
             const float fr_add = fog_r * ff;

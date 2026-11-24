@@ -3,7 +3,7 @@
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-4B32C3?logo=read-the-docs&logoColor=white)](https://deepwiki.com/Drakonosinc/PyForge3D)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Pygame](https://img.shields.io/badge/Pygame--CE-3D_Software_Engine-00B4AB)
-![Version](https://img.shields.io/badge/Version-1.5.0-22C55E)
+![Version](https://img.shields.io/badge/Version-1.6.0-22C55E)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 **PyForge3D** (`pyforge3d`) is a 100% game-agnostic, zero-OpenGL **3D Software Renderer, Multi-Threaded C99 Textured Z-Buffer Engine, Infinite Chunked Voxel Engine with Native 2D Greedy Meshing, Procedural Perlin Noise Library, Atmospheric Sky Dome, 3D DDA Raycaster, and 3D AABB Physics engine** built on top of `pygame` / `pygame-ce` and `numpy`.

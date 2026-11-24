@@ -67,6 +67,7 @@ def _configure_signatures(lib: ctypes.CDLL) -> ctypes.CDLL:
         c_u8_p, c_u8_p,                             # atlas_rgb, atlas_alpha
         c_i32_p, c_i32_p, c_i32_p, c_u8_p,          # tex_offsets, widths, heights, cutout
         ctypes.c_int,                               # clear_z
+        ctypes.c_int, c_f32_p,                      # n_dyn_lights, dyn_lights
     ]
     lib.pf3d_render_voxel_chunks.restype = ctypes.c_int
 

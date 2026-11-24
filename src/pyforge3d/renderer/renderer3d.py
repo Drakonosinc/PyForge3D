@@ -72,6 +72,8 @@ class Renderer3D:
         self.texture_lod_distance: float = max(4.0, float(texture_lod_distance))
         self.use_native: bool = bool(use_native)
         self.chunk_rebuild_budget_ms: float | None = None
+        self.dynamic_lights: list[PointLight] = []
+        self._dyn_light_buf: np.ndarray = np.empty((32, 6), dtype=np.float32)
         self.last_rendered_faces: int = 0
         self._sky_cache_key = None
         self._sky_cache_surf: pygame.Surface | None = None
@@ -183,6 +185,59 @@ class Renderer3D:
         sy = half_h - poly_cam[:, 1] * inv_z * scale
         return [(float(x), float(y), float(iz)) for x, y, iz in zip(sx, sy, inv_z)]
 
+    def _pack_dynamic_lights(
+        self,
+        cam_pos: np.ndarray,
+        dynamic_lights: list[PointLight] | None = None,
+    ) -> tuple[int, np.ndarray]:
+        lights = dynamic_lights if dynamic_lights is not None else self.dynamic_lights
+        if not lights:
+            return 0, self._dyn_light_buf
+        if len(lights) > 32:
+            cx, cy, cz = float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])
+            lights = sorted(
+                lights,
+                key=lambda pl: (float(pl.position[0]) - cx) ** 2 + (float(pl.position[1]) - cy) ** 2 + (float(pl.position[2]) - cz) ** 2,
+            )[:32]
+        n = len(lights)
+        buf = self._dyn_light_buf
+        for i, pl in enumerate(lights):
+            buf[i, 0] = float(pl.position[0])
+            buf[i, 1] = float(pl.position[1])
+            buf[i, 2] = float(pl.position[2])
+            buf[i, 3] = float(pl.intensity)
+            r = max(0.5, float(getattr(pl, "radius", 14.0)))
+            buf[i, 4] = r * r
+            buf[i, 5] = float(pl.attenuation)
+        return n, buf
+
+    @staticmethod
+    def _sample_dynamic_lights_single(
+        center: np.ndarray,
+        normal: np.ndarray,
+        n_dyn: int,
+        dyn_buf: np.ndarray,
+    ) -> float:
+        if n_dyn <= 0:
+            return 0.0
+        cx, cy, cz = float(center[0]), float(center[1]), float(center[2])
+        nx, ny, nz = float(normal[0]), float(normal[1]), float(normal[2])
+        boost = 0.0
+        for i in range(n_dyn):
+            dlx = float(dyn_buf[i, 0]) - cx
+            dly = float(dyn_buf[i, 1]) - cy
+            dlz = float(dyn_buf[i, 2]) - cz
+            dist2 = dlx * dlx + dly * dly + dlz * dlz
+            r2 = float(dyn_buf[i, 4])
+            if dist2 >= r2:
+                continue
+            falloff = 1.0 - (dist2 / r2)
+            att = 1.0 / (1.0 + float(dyn_buf[i, 5]) * dist2)
+            inv_d = 1.0 / (math.sqrt(dist2) + 1e-4)
+            nd = max(0.0, (nx * dlx + ny * dly + nz * dlz) * inv_d)
+            boost += float(dyn_buf[i, 3]) * falloff * att * (0.45 + 0.55 * nd)
+        return boost
+
     def render_scene(
         self,
         screen: pygame.Surface,
@@ -192,10 +247,12 @@ class Renderer3D:
         highlight_hit: VoxelHit | None = None,
         sky_dome: SkyDome3D | None = None,
         block_overlays: dict[tuple[int, int, int], Texture2D] | None = None,
+        dynamic_lights: list[PointLight] | None = None,
     ) -> int:
         """
         Render both a `VoxelWorld` / `ChunkedVoxelWorld` and a `Scene3D` of `Mesh3D` instances onto `screen`.
         Optional `block_overlays` maps `(bx, by, bz) -> Texture2D` for Z-buffered voxel decals (e.g. damage cracks).
+        Optional `dynamic_lights` supplies local `PointLight` emitters (e.g. torches, lanterns, lava) in addition to `self.light`.
         """
         if self.textured:
             if self.native_active:
@@ -207,6 +264,7 @@ class Renderer3D:
                     highlight_hit=highlight_hit,
                     sky_dome=sky_dome,
                     block_overlays=block_overlays,
+                    dynamic_lights=dynamic_lights,
                 )
             return self._render_scene_textured_numpy(
                 screen,
@@ -216,6 +274,7 @@ class Renderer3D:
                 highlight_hit=highlight_hit,
                 sky_dome=sky_dome,
                 block_overlays=block_overlays,
+                dynamic_lights=dynamic_lights,
             )
         if sky_dome is not None:
             sky_dome.draw(screen, camera)
@@ -254,6 +313,7 @@ class Renderer3D:
         highlight_hit: VoxelHit | None = None,
         sky_dome: SkyDome3D | None = None,
         block_overlays: dict[tuple[int, int, int], Texture2D] | None = None,
+        dynamic_lights: list[PointLight] | None = None,
     ) -> int:
         """
         Zero-copy SDL + Single-Call C99 Batched Scanline Z-Buffer Pipeline.
@@ -387,9 +447,12 @@ class Renderer3D:
             l_diffuse = float(self.light.diffuse)
             l_atten = 0.0
 
+        n_dyn_lights, dyn_buf = self._pack_dynamic_lights(cam_pos, dynamic_lights)
+
         # Prepare Scene3D Mesh3D polygons (supports both solid & textured Mesh3D!)
         mesh_polys: list[tuple] = []
         mesh_tr_polys: list[tuple] = []
+        n_dyn_lights, dyn_buf = self._pack_dynamic_lights(cam_pos, dynamic_lights)
         if scene is not None and scene.meshes:
             for mesh in scene.meshes:
                 if not mesh.visible or len(mesh.faces) == 0:
@@ -436,6 +499,8 @@ class Renderer3D:
 
                     base_rgb = mesh.face_colors[f_idx]
                     intensity = float(self.light.compute_intensities(normal_w, center_w)[0])
+                    if n_dyn_lights > 0:
+                        intensity = min(1.45, intensity + self._sample_dynamic_lights_single(center_w, normal_w, n_dyn_lights, dyn_buf))
                     fog_f_m = min(1.0, max(0.0, (d_val - fog_near) / fog_span)) if fog_enabled else 0.0
                     shaded = self.fog.apply_to_colors(base_rgb * intensity, np.array([d_val], dtype=np.float32))
 
@@ -575,6 +640,8 @@ class Renderer3D:
                     fog_r, fog_g, fog_b,
                     a_rgb_ptr, a_alp_ptr, a_off_ptr, a_w_ptr, a_h_ptr, a_cut_ptr,
                     1,  # parallel Z-buffer clear across threads!
+                    int(n_dyn_lights),
+                    dyn_buf.ctypes.data if n_dyn_lights > 0 else 0,
                 )
                 total_faces += int(drawn_voxels)
             else:
@@ -634,6 +701,7 @@ class Renderer3D:
         highlight_hit: VoxelHit | None = None,
         sky_dome: SkyDome3D | None = None,
         block_overlays: dict[tuple[int, int, int], Texture2D] | None = None,
+        dynamic_lights: list[PointLight] | None = None,
     ) -> int:
         """100% Pure-NumPy portable fallback Z-Buffer textured pipeline (used when C99 binary is unavailable/disabled)."""
         scr_w, scr_h = screen.get_size()
@@ -724,6 +792,24 @@ class Renderer3D:
 
                         depths = np.linalg.norm(q_cam.mean(axis=1), axis=1)
                         intensities = self.light.compute_intensities(n_vis, cent_vis)
+                        n_dyn_np, dyn_buf_np = self._pack_dynamic_lights(cam_pos, dynamic_lights)
+                        if n_dyn_np > 0:
+                            q_min = np.min(quads_w[orig_indices], axis=1)
+                            q_max = np.max(quads_w[orig_indices], axis=1)
+                            for li in range(n_dyn_np):
+                                lp = dyn_buf_np[li, :3]
+                                samp = 0.5 * (cent_vis + np.clip(lp[None, :], q_min, q_max))
+                                dv = lp[None, :] - samp
+                                d2 = np.einsum("ij,ij->i", dv, dv)
+                                r2 = float(dyn_buf_np[li, 4])
+                                active = d2 < r2
+                                if np.any(active):
+                                    d2_a = d2[active]
+                                    fall = 1.0 - d2_a / r2
+                                    att = 1.0 / (1.0 + float(dyn_buf_np[li, 5]) * d2_a)
+                                    inv_d = 1.0 / (np.sqrt(d2_a) + 1e-4)
+                                    nd = np.maximum(0.0, np.einsum("ij,ij->i", n_vis[active], dv[active]) * inv_d)
+                                    intensities[active] += float(dyn_buf_np[li, 3]) * fall * att * (0.45 + 0.55 * nd)
                         face_bias = np.where(
                             n_vis[:, 1] > 0.5,
                             1.06,
@@ -733,7 +819,7 @@ class Renderer3D:
                                 np.where(np.abs(n_vis[:, 0]) > 0.5, 0.84, 0.94),
                             ),
                         ).astype(np.float32)
-                        shades = np.clip(intensities * face_bias * ao_vis + em_vis, 0.15, 1.35)
+                        shades = np.clip(intensities * face_bias * ao_vis + em_vis, 0.15, 1.45)
                         fog_factors = (
                             np.clip((depths - fog_near) / fog_span, 0.0, 1.0)
                             if fog_enabled
@@ -819,6 +905,7 @@ class Renderer3D:
                             else:
                                 opaque_items.append(item)
 
+        n_dyn_lights, dyn_buf = self._pack_dynamic_lights(cam_pos, dynamic_lights)
         if scene is not None and scene.meshes:
             for mesh in scene.meshes:
                 if not mesh.visible or len(mesh.faces) == 0:
@@ -864,6 +951,8 @@ class Renderer3D:
 
                     base_rgb = mesh.face_colors[f_idx]
                     intensity = float(self.light.compute_intensities(normal_w, center_w)[0])
+                    if n_dyn_lights > 0:
+                        intensity = min(1.45, intensity + self._sample_dynamic_lights_single(center_w, normal_w, n_dyn_lights, dyn_buf))
                     fog_f_m = min(1.0, max(0.0, (d_val - fog_near) / fog_span)) if fog_enabled else 0.0
                     shaded = self.fog.apply_to_colors(base_rgb * intensity, np.array([d_val], dtype=np.float32))
                     rgb_tuple = (int(shaded[0]), int(shaded[1]), int(shaded[2]))

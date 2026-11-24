@@ -30,7 +30,7 @@ class DirectionalLight:
 
 
 class PointLight:
-    """Omnidirectional 3D point light with distance attenuation."""
+    """Omnidirectional 3D point light with distance attenuation and optional finite influence radius."""
 
     def __init__(
         self,
@@ -38,11 +38,15 @@ class PointLight:
         ambient: float = 0.3,
         intensity: float = 1.2,
         attenuation: float = 0.04,
+        radius: float = 14.0,
+        color: tuple[int, int, int] = (255, 240, 210),
     ) -> None:
         self.position = np.array(position, dtype=np.float32)
         self.ambient = max(0.0, min(1.0, float(ambient)))
         self.intensity = max(0.0, float(intensity))
         self.attenuation = max(0.0, float(attenuation))
+        self.radius = max(0.5, float(radius))
+        self.color = (int(color[0]), int(color[1]), int(color[2]))
 
     def compute_intensities(self, normals: np.ndarray, centers: np.ndarray) -> np.ndarray:
         n = np.asarray(normals, dtype=np.float32)

@@ -1,6 +1,6 @@
 """PyForge3D: High-Performance Dual-Backend (C99 Native + Vectorized NumPy) 3D Software Renderer, Textured Z-Buffer, Chunked Voxel Engine & Physics for Pygame."""
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 __author__ = "Drakonosinc"
 
 from .camera import Camera3D, FirstPersonController, OrbitCamera
@@ -14,7 +14,7 @@ from .math import (
 )
 from .meshes import Mesh3D, OBJLoader, Primitives
 from .physics import AABB3D, VoxelPhysicsBody
-from .procedural import FractalNoise2D, PerlinNoise2D, hash_2d
+from .procedural import FractalNoise2D, FractalNoise3D, PerlinNoise2D, PerlinNoise3D, hash_2d, hash_3d
 from .renderer import (
     CANONICAL_QUAD_UV,
     HAS_NATIVE_RASTERIZER,
@@ -39,11 +39,13 @@ __all__ = [
     "FirstPersonController",
     "Fog3D",
     "FractalNoise2D",
+    "FractalNoise3D",
     "Matrix4",
     "Mesh3D",
     "OBJLoader",
     "OrbitCamera",
     "PerlinNoise2D",
+    "PerlinNoise3D",
     "PointLight",
     "Primitives",
     "Renderer3D",
@@ -62,5 +64,6 @@ __all__ = [
     "clip_textured_polygon_near_plane",
     "compute_face_normals",
     "hash_2d",
+    "hash_3d",
     "normalize_vectors",
 ]

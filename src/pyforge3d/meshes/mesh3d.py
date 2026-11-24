@@ -248,6 +248,56 @@ class Primitives:
         return mesh
 
     @staticmethod
+    def textured_box(
+        width: float = 1.0,
+        height: float = 1.0,
+        depth: float = 1.0,
+        front_texture: Texture2D | None = None,
+        back_texture: Texture2D | None = None,
+        right_texture: Texture2D | None = None,
+        left_texture: Texture2D | None = None,
+        top_texture: Texture2D | None = None,
+        bottom_texture: Texture2D | None = None,
+        side_texture: Texture2D | None = None,
+        color: tuple[int, int, int] | None = None,
+        position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        rotation: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        pivot_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        alpha: int = 255,
+    ) -> Mesh3D:
+        """
+        Create a rectangular 6-face textured 3D box with independent per-face textures and an
+        optional local `pivot_offset` (ideal for articulated characters, limbs, props, or vehicles).
+        """
+        default_side = side_texture if side_texture is not None else (front_texture or top_texture)
+        f_tex = front_texture if front_texture is not None else default_side
+        bk_tex = back_texture if back_texture is not None else default_side
+        r_tex = right_texture if right_texture is not None else default_side
+        l_tex = left_texture if left_texture is not None else default_side
+        t_tex = top_texture if top_texture is not None else default_side
+        bt_tex = bottom_texture if bottom_texture is not None else default_side
+
+        fallback_col = (
+            color
+            if color is not None
+            else (f_tex.avg_color if f_tex is not None else (200, 200, 200))
+        )
+        mesh = Primitives.cube(
+            size=(float(width), float(height), float(depth)),
+            color=fallback_col,
+            position=position,
+            rotation=rotation,
+        )
+        if pivot_offset != (0.0, 0.0, 0.0):
+            off = np.array(pivot_offset, dtype=np.float32)
+            mesh.vertices = mesh.vertices + off[None, :]
+        # Face order in Primitives.cube: Front(-Z), Back(+Z), Right(+X), Left(-X), Top(+Y), Bottom(-Y)
+        mesh.face_textures = [f_tex, bk_tex, r_tex, l_tex, t_tex, bt_tex]
+        mesh.face_uvs = [_CANONICAL_QUAD_UV] * 6
+        mesh.alpha = max(0, min(255, int(alpha)))
+        return mesh
+
+    @staticmethod
     def pyramid(
         base_size: float = 1.0,
         height: float = 1.2,
