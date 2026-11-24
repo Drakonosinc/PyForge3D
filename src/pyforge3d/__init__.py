@@ -1,6 +1,6 @@
-"""PyForge3D: Vectorized 3D Software Renderer, Textured Z-Buffer, Chunked Voxel Engine, Procedural Noise & AABB Physics for Pygame."""
+"""PyForge3D: High-Performance Dual-Backend (C99 Native + Vectorized NumPy) 3D Software Renderer, Textured Z-Buffer, Chunked Voxel Engine & Physics for Pygame."""
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "Drakonosinc"
 
 from .camera import Camera3D, FirstPersonController, OrbitCamera
@@ -17,18 +17,21 @@ from .physics import AABB3D, VoxelPhysicsBody
 from .procedural import FractalNoise2D, PerlinNoise2D, hash_2d
 from .renderer import (
     CANONICAL_QUAD_UV,
+    HAS_NATIVE_RASTERIZER,
     Renderer3D,
     Scene3D,
     SoftwareTexturedRasterizer,
+    build_native_rasterizer,
     clip_textured_polygon_near_plane,
 )
-from .textures import Texture2D
+from .textures import Texture2D, TextureAtlas
 from .voxels import Chunk3D, ChunkedVoxelWorld, VoxelHit, VoxelMaterial, VoxelWorld
 
 __all__ = [
     "__version__",
     "AABB3D",
     "CANONICAL_QUAD_UV",
+    "HAS_NATIVE_RASTERIZER",
     "Camera3D",
     "Chunk3D",
     "ChunkedVoxelWorld",
@@ -48,11 +51,13 @@ __all__ = [
     "SkyDome3D",
     "SoftwareTexturedRasterizer",
     "Texture2D",
+    "TextureAtlas",
     "Transform3D",
     "VoxelHit",
     "VoxelMaterial",
     "VoxelPhysicsBody",
     "VoxelWorld",
+    "build_native_rasterizer",
     "clip_polygon_near_plane",
     "clip_textured_polygon_near_plane",
     "compute_face_normals",

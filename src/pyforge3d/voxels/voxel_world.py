@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 import numpy as np
+from ..textures.atlas import TextureAtlas
 from ..textures.texture2d import Texture2D
 
 
@@ -112,14 +113,17 @@ class VoxelWorld:
 
     def __init__(self) -> None:
         self.blocks: dict[tuple[int, int, int], tuple[int, int, int] | VoxelMaterial] = {}
+        self.atlas: TextureAtlas = TextureAtlas()
         self._dirty: bool = True
         self._cached_quads: np.ndarray = np.empty((0, 4, 3), dtype=np.float32)
         self._cached_normals: np.ndarray = np.empty((0, 3), dtype=np.float32)
         self._cached_colors: np.ndarray = np.empty((0, 3), dtype=np.float32)
         self._cached_textures: list[Texture2D | None] = []
+        self._cached_tex_ids: np.ndarray = np.empty((0,), dtype=np.int32)
         self._cached_alphas: np.ndarray = np.empty((0,), dtype=np.uint8)
         self._cached_emissive: np.ndarray = np.empty((0,), dtype=np.float32)
         self._cached_ao: np.ndarray = np.empty((0,), dtype=np.float32)
+        self._cached_is_translucent: np.ndarray = np.empty((0,), dtype=bool)
 
     @staticmethod
     def _coerce_material(color: tuple[int, int, int] | VoxelMaterial) -> tuple[int, int, int] | VoxelMaterial:
@@ -232,9 +236,12 @@ class VoxelWorld:
         normals_list: list[tuple[int, int, int]] = []
         colors_list: list[tuple[int, int, int]] = []
         textures_list: list[Texture2D | None] = []
+        tex_ids_list: list[int] = []
         alphas_list: list[int] = []
         emissive_list: list[float] = []
         ao_list: list[float] = []
+        translucent_list: list[bool] = []
+        atlas_reg = self.atlas.register
 
         blocks_dict = self.blocks
         for (bx, by, bz), mat in blocks_dict.items():
@@ -257,9 +264,12 @@ class VoxelWorld:
                 normals_list.append((nx, ny, nz))
                 face_rgb = mat.color_for_normal((nx, ny, nz)) if is_mat else mat
                 colors_list.append(face_rgb)
-                textures_list.append(mat.texture_for_normal((nx, ny, nz)) if is_mat else None)
+                tex = mat.texture_for_normal((nx, ny, nz)) if is_mat else None
+                textures_list.append(tex)
+                tex_ids_list.append(atlas_reg(tex))
                 alphas_list.append(mat_alpha)
                 emissive_list.append(mat_emissive)
+                translucent_list.append((mat_alpha < 255) or (tex is not None and tex.has_cutout))
 
                 # Lightweight face Ambient Occlusion from upper-adjacent occluders
                 if ny == 1:
@@ -278,22 +288,27 @@ class VoxelWorld:
                 else:
                     ao_list.append(0.88)
 
+        self.atlas.ensure_packed()
         if quads_list:
             self._cached_quads = np.asarray(quads_list, dtype=np.float32)
             self._cached_normals = np.asarray(normals_list, dtype=np.float32)
             self._cached_colors = np.asarray(colors_list, dtype=np.float32)
             self._cached_textures = textures_list
+            self._cached_tex_ids = np.asarray(tex_ids_list, dtype=np.int32)
             self._cached_alphas = np.asarray(alphas_list, dtype=np.uint8)
             self._cached_emissive = np.asarray(emissive_list, dtype=np.float32)
             self._cached_ao = np.asarray(ao_list, dtype=np.float32)
+            self._cached_is_translucent = np.asarray(translucent_list, dtype=bool)
         else:
             self._cached_quads = np.empty((0, 4, 3), dtype=np.float32)
             self._cached_normals = np.empty((0, 3), dtype=np.float32)
             self._cached_colors = np.empty((0, 3), dtype=np.float32)
             self._cached_textures = []
+            self._cached_tex_ids = np.empty((0,), dtype=np.int32)
             self._cached_alphas = np.empty((0,), dtype=np.uint8)
             self._cached_emissive = np.empty((0,), dtype=np.float32)
             self._cached_ao = np.empty((0,), dtype=np.float32)
+            self._cached_is_translucent = np.empty((0,), dtype=bool)
 
         self._dirty = False
 
@@ -307,7 +322,7 @@ class VoxelWorld:
         return self._cached_quads, self._cached_normals, self._cached_colors
 
     def get_culled_render_data(self) -> dict[str, Any]:
-        """Return full culled render batch including textures, alphas, emissive boost, and Ambient Occlusion."""
+        """Return full culled render batch including textures, atlas IDs, alphas, emissive boost, and AO."""
         if self._dirty:
             self._rebuild_cache()
         return {
@@ -315,9 +330,12 @@ class VoxelWorld:
             "normals": self._cached_normals,
             "colors": self._cached_colors,
             "textures": self._cached_textures,
+            "tex_ids": self._cached_tex_ids,
             "alphas": self._cached_alphas,
             "emissive": self._cached_emissive,
             "ao": self._cached_ao,
+            "is_translucent": self._cached_is_translucent,
+            "atlas": self.atlas,
         }
 
     def raycast(

@@ -85,7 +85,7 @@ class SoftwareTexturedRasterizer:
     def __init__(self, width: int, height: int) -> None:
         self.width = max(16, int(width))
         self.height = max(16, int(height))
-        self.surface = pygame.Surface((self.width, self.height))
+        self.surface = pygame.Surface((self.width, self.height), depth=32)
         self.color_buf = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         self.z_buf = np.zeros((self.height, self.width), dtype=np.float32)
         self._xs = np.arange(self.width, dtype=np.float32) + 0.5
@@ -98,7 +98,7 @@ class SoftwareTexturedRasterizer:
         if w != self.width or h != self.height:
             self.width = w
             self.height = h
-            self.surface = pygame.Surface((w, h))
+            self.surface = pygame.Surface((w, h), depth=32)
             self.color_buf = np.zeros((h, w, 3), dtype=np.uint8)
             self.z_buf = np.zeros((h, w), dtype=np.float32)
             self._xs = np.arange(w, dtype=np.float32) + 0.5

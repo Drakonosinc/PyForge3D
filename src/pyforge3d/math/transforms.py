@@ -17,10 +17,22 @@ def normalize_vectors(vectors: np.ndarray, eps: float = 1e-8) -> np.ndarray:
 
 
 def compute_face_normals(v0: np.ndarray, v1: np.ndarray, v2: np.ndarray) -> np.ndarray:
-    """Compute unit surface normals for triangles/quads given their first 3 vertices (N, 3) in left-handed winding."""
-    edge1 = v1 - v0
-    edge2 = v2 - v0
-    cross = np.cross(edge1, edge2)
+    """Compute unit surface normals for triangles/quads given their first 3 vertices (3,) or (N, 3) in left-handed winding."""
+    e1 = v1 - v0
+    e2 = v2 - v0
+    if e1.ndim == 1:
+        nx = float(e1[1] * e2[2] - e1[2] * e2[1])
+        ny = float(e1[2] * e2[0] - e1[0] * e2[2])
+        nz = float(e1[0] * e2[1] - e1[1] * e2[0])
+        inv = math.sqrt(nx * nx + ny * ny + nz * nz)
+        if inv > 1e-8:
+            inv = 1.0 / inv
+            return np.array([nx * inv, ny * inv, nz * inv], dtype=np.float32)
+        return np.zeros(3, dtype=np.float32)
+    nx = e1[:, 1] * e2[:, 2] - e1[:, 2] * e2[:, 1]
+    ny = e1[:, 2] * e2[:, 0] - e1[:, 0] * e2[:, 2]
+    nz = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    cross = np.stack((nx, ny, nz), axis=1).astype(np.float32, copy=False)
     return normalize_vectors(cross)
 
 

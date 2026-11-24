@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyforge3d"
-version = "1.1.0"
+version = "1.2.0"
 description = "Vectorized 3D Software Renderer, Voxel World Engine, 3D Meshes, Lighting, Raycasting, and AABB Physics library for Pygame."
 readme = "README.md"
 license = { text = "MIT" }
@@ -47,3 +47,6 @@ Documentation = "https://deepwiki.com/Drakonosinc/PyForge3D"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+pyforge3d = ["renderer/_native_rasterizer.c", "renderer/_pyforge3d_native.*"]

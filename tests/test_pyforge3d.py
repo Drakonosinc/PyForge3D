@@ -409,6 +409,50 @@ class TestPyForge3D(unittest.TestCase):
         drawn = renderer.render_scene(self.screen, cam, scene=scene, voxel_world=world, sky_dome=sky)
         self.assertGreater(drawn, 15)
 
+    def test_13_native_and_numpy_backend_parity_and_frustum_culling(self) -> None:
+        from pyforge3d import HAS_NATIVE_RASTERIZER, TextureAtlas
+
+        tex_arr = np.zeros((16, 16, 3), dtype=np.uint8)
+        tex_arr[:, :] = (82, 170, 62)
+        tex_arr[0:4, :] = (110, 200, 75)
+        tex = Texture2D(tex_arr)
+        atlas = TextureAtlas()
+        tid = atlas.register(tex)
+        self.assertEqual(tid, 0)
+        self.assertEqual(atlas.register(tex), 0)
+        atlas.ensure_packed()
+        self.assertEqual(len(atlas), 1)
+
+        mat = VoxelMaterial(top_texture=tex, side_texture=tex, bottom_texture=tex, name="Block")
+        world = ChunkedVoxelWorld(chunk_size=8)
+        for x in range(-12, 16):
+            for z in range(-12, 16):
+                world.set_block_raw(x, 0, z, mat)
+        world.get_culled_render_data()
+
+        cam = Camera3D(position=(2.0, 4.0, 2.0), yaw=0.0, pitch=-0.25, fov=72.0, far=24.0)
+        sky = SkyDome3D(time_of_day=0.25)
+
+        surf_native = pygame.Surface((400, 240), depth=32)
+        surf_numpy = pygame.Surface((400, 240), depth=32)
+
+        r_native = Renderer3D(400, 240, textured=True, render_scale=0.5, use_native=True)
+        r_numpy = Renderer3D(400, 240, textured=True, render_scale=0.5, use_native=False)
+        sky.sync_lighting(r_native.light, r_native.fog)
+        sky.sync_lighting(r_numpy.light, r_numpy.fog)
+
+        n_nat = r_native.render_scene(surf_native, cam, voxel_world=world, sky_dome=sky)
+        n_np = r_numpy.render_scene(surf_numpy, cam, voxel_world=world, sky_dome=sky)
+        self.assertGreater(n_nat, 20)
+        self.assertEqual(n_nat, n_np)
+        self.assertTrue(HAS_NATIVE_RASTERIZER)
+
+        # Verify pixel parity between native C99 and Pure-NumPy fallback!
+        arr_nat = pygame.surfarray.array3d(surf_native).astype(np.int16)
+        arr_np = pygame.surfarray.array3d(surf_numpy).astype(np.int16)
+        mean_diff = float(np.abs(arr_nat - arr_np).mean())
+        self.assertLess(mean_diff, 4.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
