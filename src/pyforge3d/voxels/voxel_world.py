@@ -2,16 +2,49 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 import numpy as np
+from ..textures.texture2d import Texture2D
 
 
 @dataclass(frozen=True)
 class VoxelMaterial:
-    """Multi-face RGB color definition for Minecraft-style blocks (distinct top, side, and bottom colors)."""
+    """
+    Multi-face color & optional 2D texture definition for voxel blocks
+    (distinct top, side, and bottom colors/textures, optional alpha translucency, solidity, and emissive boost).
+    """
 
-    top: tuple[int, int, int]
-    side: tuple[int, int, int]
+    top: tuple[int, int, int] | None = None
+    side: tuple[int, int, int] | None = None
     bottom: tuple[int, int, int] | None = None
+    top_texture: Texture2D | None = None
+    side_texture: Texture2D | None = None
+    bottom_texture: Texture2D | None = None
+    alpha: int = 255
+    solid: bool = True
+    emissive: float = 0.0
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        if self.top is None:
+            col = self.top_texture.avg_color if self.top_texture is not None else (
+                self.side_texture.avg_color if self.side_texture is not None else (180, 180, 180)
+            )
+            object.__setattr__(self, "top", col)
+        if self.side is None:
+            col = self.side_texture.avg_color if self.side_texture is not None else self.top
+            object.__setattr__(self, "side", col)
+        if self.bottom is None and self.bottom_texture is not None:
+            object.__setattr__(self, "bottom", self.bottom_texture.avg_color)
+
+    @property
+    def is_transparent(self) -> bool:
+        if self.alpha < 255:
+            return True
+        for tex in (self.top_texture, self.side_texture, self.bottom_texture):
+            if tex is not None and tex.has_cutout:
+                return True
+        return False
 
     def color_for_normal(self, normal: tuple[int, int, int]) -> tuple[int, int, int]:
         ny = normal[1]
@@ -20,6 +53,14 @@ class VoxelMaterial:
         if ny < 0:
             return self.bottom if self.bottom is not None else self.side
         return self.side
+
+    def texture_for_normal(self, normal: tuple[int, int, int]) -> Texture2D | None:
+        ny = normal[1]
+        if ny > 0:
+            return self.top_texture
+        if ny < 0:
+            return self.bottom_texture if self.bottom_texture is not None else self.side_texture
+        return self.side_texture
 
 
 @dataclass(frozen=True)
@@ -75,6 +116,10 @@ class VoxelWorld:
         self._cached_quads: np.ndarray = np.empty((0, 4, 3), dtype=np.float32)
         self._cached_normals: np.ndarray = np.empty((0, 3), dtype=np.float32)
         self._cached_colors: np.ndarray = np.empty((0, 3), dtype=np.float32)
+        self._cached_textures: list[Texture2D | None] = []
+        self._cached_alphas: np.ndarray = np.empty((0,), dtype=np.uint8)
+        self._cached_emissive: np.ndarray = np.empty((0,), dtype=np.float32)
+        self._cached_ao: np.ndarray = np.empty((0,), dtype=np.float32)
 
     @staticmethod
     def _coerce_material(color: tuple[int, int, int] | VoxelMaterial) -> tuple[int, int, int] | VoxelMaterial:
@@ -99,6 +144,12 @@ class VoxelWorld:
 
     def has_block(self, x: int, y: int, z: int) -> bool:
         return (int(x), int(y), int(z)) in self.blocks
+
+    def is_solid(self, x: int, y: int, z: int) -> bool:
+        mat = self.blocks.get((int(x), int(y), int(z)))
+        if mat is None:
+            return False
+        return bool(mat.solid) if isinstance(mat, VoxelMaterial) else True
 
     def get_block(self, x: int, y: int, z: int) -> tuple[int, int, int] | VoxelMaterial | None:
         return self.blocks.get((int(x), int(y), int(z)))
@@ -176,40 +227,98 @@ class VoxelWorld:
                     col = palette[min(y, len(palette) - 1)]
                     self.set_block(x, y, z, col)
 
-    def get_culled_quads(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Return cached `(quad_vertices (M, 4, 3), quad_normals (M, 3), quad_colors (M, 3))`
-        containing ONLY exposed faces whose neighboring voxel cell is empty.
-        """
-        if not self._dirty:
-            return self._cached_quads, self._cached_normals, self._cached_colors
-
+    def _rebuild_cache(self) -> None:
         quads_list: list[np.ndarray] = []
         normals_list: list[tuple[int, int, int]] = []
         colors_list: list[tuple[int, int, int]] = []
+        textures_list: list[Texture2D | None] = []
+        alphas_list: list[int] = []
+        emissive_list: list[float] = []
+        ao_list: list[float] = []
 
         blocks_dict = self.blocks
         for (bx, by, bz), mat in blocks_dict.items():
             offset = np.array([bx, by, bz], dtype=np.float32)
             is_mat = isinstance(mat, VoxelMaterial)
+            mat_trans = mat.is_transparent if is_mat else False
+            mat_alpha = mat.alpha if is_mat else 255
+            mat_emissive = mat.emissive if is_mat else 0.0
+
             for (nx, ny, nz), unit_quad in _VOXEL_FACES:
-                if (bx + nx, by + ny, bz + nz) not in blocks_dict:
-                    quads_list.append(unit_quad + offset)
-                    normals_list.append((nx, ny, nz))
-                    face_rgb = mat.color_for_normal((nx, ny, nz)) if is_mat else mat
-                    colors_list.append(face_rgb)
+                neighbor = blocks_dict.get((bx + nx, by + ny, bz + nz))
+                if neighbor is not None:
+                    n_trans = neighbor.is_transparent if isinstance(neighbor, VoxelMaterial) else False
+                    if not n_trans:
+                        continue
+                    if mat_trans and n_trans:
+                        continue
+
+                quads_list.append(unit_quad + offset)
+                normals_list.append((nx, ny, nz))
+                face_rgb = mat.color_for_normal((nx, ny, nz)) if is_mat else mat
+                colors_list.append(face_rgb)
+                textures_list.append(mat.texture_for_normal((nx, ny, nz)) if is_mat else None)
+                alphas_list.append(mat_alpha)
+                emissive_list.append(mat_emissive)
+
+                # Lightweight face Ambient Occlusion from upper-adjacent occluders
+                if ny == 1:
+                    occ = 0
+                    for ox, oz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        if (bx + ox, by + 1, bz + oz) in blocks_dict:
+                            nb = blocks_dict[(bx + ox, by + 1, bz + oz)]
+                            if not (isinstance(nb, VoxelMaterial) and nb.is_transparent):
+                                occ += 1
+                    ao_list.append(max(0.72, 1.0 - occ * 0.065))
+                elif ny == 0:
+                    has_overhang = (bx + nx, by + 1, bz + nz) in blocks_dict
+                    has_floor_edge = (bx + nx, by - 1, bz + nz) in blocks_dict
+                    ao_val = 1.0 - (0.12 if has_overhang else 0.0) - (0.06 if has_floor_edge else 0.0)
+                    ao_list.append(ao_val)
+                else:
+                    ao_list.append(0.88)
 
         if quads_list:
             self._cached_quads = np.asarray(quads_list, dtype=np.float32)
             self._cached_normals = np.asarray(normals_list, dtype=np.float32)
             self._cached_colors = np.asarray(colors_list, dtype=np.float32)
+            self._cached_textures = textures_list
+            self._cached_alphas = np.asarray(alphas_list, dtype=np.uint8)
+            self._cached_emissive = np.asarray(emissive_list, dtype=np.float32)
+            self._cached_ao = np.asarray(ao_list, dtype=np.float32)
         else:
             self._cached_quads = np.empty((0, 4, 3), dtype=np.float32)
             self._cached_normals = np.empty((0, 3), dtype=np.float32)
             self._cached_colors = np.empty((0, 3), dtype=np.float32)
+            self._cached_textures = []
+            self._cached_alphas = np.empty((0,), dtype=np.uint8)
+            self._cached_emissive = np.empty((0,), dtype=np.float32)
+            self._cached_ao = np.empty((0,), dtype=np.float32)
 
         self._dirty = False
+
+    def get_culled_quads(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Return cached `(quad_vertices (M, 4, 3), quad_normals (M, 3), quad_colors (M, 3))`
+        containing ONLY exposed faces whose neighboring voxel cell is empty or transparent.
+        """
+        if self._dirty:
+            self._rebuild_cache()
         return self._cached_quads, self._cached_normals, self._cached_colors
+
+    def get_culled_render_data(self) -> dict[str, Any]:
+        """Return full culled render batch including textures, alphas, emissive boost, and Ambient Occlusion."""
+        if self._dirty:
+            self._rebuild_cache()
+        return {
+            "quads": self._cached_quads,
+            "normals": self._cached_normals,
+            "colors": self._cached_colors,
+            "textures": self._cached_textures,
+            "alphas": self._cached_alphas,
+            "emissive": self._cached_emissive,
+            "ao": self._cached_ao,
+        }
 
     def raycast(
         self,

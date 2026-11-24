@@ -127,10 +127,14 @@ class VoxelPhysicsBody:
         z0 = math.floor(self.aabb.min_z + eps)
         z1 = math.floor(self.aabb.max_z - eps)
 
+        is_solid_fn = getattr(world, "is_solid", None)
         for bx in range(x0, x1 + 1):
             for by in range(y0, y1 + 1):
                 for bz in range(z0, z1 + 1):
-                    if (bx, by, bz) in world.blocks:
+                    if is_solid_fn is not None:
+                        if is_solid_fn(bx, by, bz):
+                            return True
+                    elif (bx, by, bz) in world.blocks:
                         return True
         return False
 

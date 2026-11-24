@@ -10,24 +10,33 @@ import numpy as np
 import pygame
 from pyforge3d import (
     AABB3D,
+    CANONICAL_QUAD_UV,
     Camera3D,
+    ChunkedVoxelWorld,
     DirectionalLight,
     FirstPersonController,
     Fog3D,
+    FractalNoise2D,
     Matrix4,
     Mesh3D,
     OBJLoader,
     OrbitCamera,
+    PerlinNoise2D,
     PointLight,
     Primitives,
     Renderer3D,
     Scene3D,
+    SkyDome3D,
+    SoftwareTexturedRasterizer,
+    Texture2D,
     Transform3D,
     VoxelPhysicsBody,
     VoxelMaterial,
     VoxelWorld,
     clip_polygon_near_plane,
+    clip_textured_polygon_near_plane,
     compute_face_normals,
+    hash_2d,
 )
 
 
@@ -212,6 +221,193 @@ class TestPyForge3D(unittest.TestCase):
         renderer.draw_sky_gradient(self.screen, cam)
         drawn = renderer.render_scene(self.screen, cam, voxel_world=world)
         self.assertGreater(drawn, 5)
+
+    def test_08_procedural_perlin_and_fractal_noise(self) -> None:
+        p1 = PerlinNoise2D(seed=42)
+        p2 = PerlinNoise2D(seed=42)
+        xs = np.linspace(-10.0, 10.0, 32, dtype=np.float32)
+        zs = np.linspace(-10.0, 10.0, 32, dtype=np.float32)
+        gx, gz = np.meshgrid(xs, zs)
+
+        v1 = p1.sample(gx, gz)
+        v2 = p2.sample(gx, gz)
+        self.assertEqual(v1.shape, (32, 32))
+        self.assertTrue(np.allclose(v1, v2))
+        self.assertGreaterEqual(float(v1.min()), -1.05)
+        self.assertLessEqual(float(v1.max()), 1.05)
+
+        fbm = FractalNoise2D(seed=99, octaves=4, persistence=0.5, lacunarity=2.0, scale=14.0)
+        f_vals = fbm.sample(gx, gz, normalized=True)
+        self.assertGreaterEqual(float(f_vals.min()), 0.0)
+        self.assertLessEqual(float(f_vals.max()), 1.0)
+        # Scalar query matches array query
+        self.assertAlmostEqual(
+            float(fbm.sample(float(xs[5]), float(zs[7]), normalized=True)),
+            float(f_vals[7, 5]),
+            places=4,
+        )
+
+        h1 = hash_2d(12, -7, seed=1337)
+        h2 = hash_2d(12, -7, seed=1337)
+        self.assertEqual(h1, h2)
+        self.assertGreaterEqual(h1, 0.0)
+        self.assertLess(h1, 1.0)
+
+    def test_09_texture2d_and_material_transparency(self) -> None:
+        rgb_arr = np.full((16, 16, 3), (60, 180, 90), dtype=np.uint8)
+        tex_opaque = Texture2D(rgb_arr)
+        self.assertFalse(tex_opaque.has_cutout)
+        self.assertEqual(tex_opaque.avg_color, (60, 180, 90))
+        surf = tex_opaque.to_surface((32, 32))
+        self.assertEqual(surf.get_size(), (32, 32))
+
+        rgba_arr = np.full((16, 16, 4), (180, 220, 255, 110), dtype=np.uint8)
+        rgba_arr[0, :, 3] = 255  # opaque border
+        tex_glass = Texture2D(rgba_arr)
+        self.assertTrue(tex_glass.has_cutout)
+        self.assertIsNotNone(tex_glass.alpha)
+
+        from_s = Texture2D.from_surface(surf)
+        self.assertEqual(from_s.width, 32)
+        self.assertEqual(from_s.height, 32)
+
+        water_mat = VoxelMaterial(
+            top=(40, 120, 220),
+            side=(35, 110, 210),
+            bottom=(30, 95, 195),
+            top_texture=tex_opaque,
+            alpha=165,
+            solid=False,
+            name="Water",
+        )
+        self.assertTrue(water_mat.is_transparent)
+        self.assertIs(water_mat.texture_for_normal((0, 1, 0)), tex_opaque)
+
+    def test_10_chunked_voxel_world_streaming_overrides_and_raycast(self) -> None:
+        solid_mat = VoxelMaterial(top=(80, 160, 80), side=(120, 90, 60), bottom=(100, 70, 50), solid=True, name="Terrain")
+        water_mat = VoxelMaterial(top=(40, 110, 220), side=(40, 110, 220), bottom=(30, 90, 200), alpha=160, solid=False, name="Water")
+
+        def simple_gen(cx: int, cz: int, cs: int, w: ChunkedVoxelWorld) -> None:
+            x0, z0 = cx * cs, cz * cs
+            for lx in range(cs):
+                for lz in range(cs):
+                    wx, wz = x0 + lx, z0 + lz
+                    w.set_block_raw(wx, 0, wz, solid_mat)
+                    if lx == cs - 1 and lz == 2:
+                        # Cross-chunk spillover write into adjacent chunk (cx+1, cz) before it generates
+                        w.set_block_raw(wx + 1, 3, wz, solid_mat)
+            w.set_block_raw(x0 + 2, 1, z0 + 2, water_mat)
+
+        world = ChunkedVoxelWorld(chunk_size=8, generator_fn=simple_gen)
+        created = world.update_chunks_around(0.0, 0.0, load_radius=1, unload_radius=2, max_new_per_call=16)
+        self.assertGreaterEqual(created, 5)
+        self.assertTrue(world.has_block(0, 0, 0))
+        self.assertTrue(world.is_solid(0, 0, 0))
+        # Adjacent chunk (1, 0) must still have generated full ground even after spillover write at (8, 3, 2)
+        self.assertTrue(world.has_block(8, 0, 0))
+        self.assertTrue(world.has_block(8, 3, 2))
+        # Water block is non-solid
+        self.assertTrue(world.has_block(2, 1, 2))
+        self.assertFalse(world.is_solid(2, 1, 2))
+
+        # User edit persists across chunk unload & reload!
+        custom_mat = VoxelMaterial(top=(255, 210, 40), side=(255, 210, 40), bottom=(255, 210, 40), name="Gold")
+        world.set_block(1, 2, 1, custom_mat)
+        world.remove_block(1, 0, 1)
+        # Move far away to unload chunk (0, 0)
+        world.update_chunks_around(80.0, 80.0, load_radius=1, unload_radius=2, max_new_per_call=16)
+        self.assertNotIn((0, 0), world.chunks)
+        # Return to (0, 0) and confirm overrides survived
+        world.update_chunks_around(0.0, 0.0, load_radius=1, unload_radius=2, max_new_per_call=16)
+        self.assertIn((0, 0), world.chunks)
+        self.assertEqual(world.get_block(1, 2, 1), custom_mat)
+        self.assertFalse(world.has_block(1, 0, 1))
+
+        # Raycast skips non-solid water by default and hits solid ground beneath
+        hit_solid = world.raycast(origin=(2.5, 4.0, 2.5), direction=(0.0, -1.0, 0.0), max_distance=8.0, skip_non_solid=True)
+        self.assertIsNotNone(hit_solid)
+        assert hit_solid is not None
+        self.assertEqual(hit_solid.block_pos, (2, 0, 2))
+
+        # Raycast with skip_non_solid=False hits the water at y=1
+        hit_water = world.raycast(origin=(2.5, 4.0, 2.5), direction=(0.0, -1.0, 0.0), max_distance=8.0, skip_non_solid=False)
+        self.assertIsNotNone(hit_water)
+        assert hit_water is not None
+        self.assertEqual(hit_water.block_pos, (2, 1, 2))
+
+        # Physics body passes through non-solid water and lands on solid ground y=0 (top at 1.0)
+        body = VoxelPhysicsBody(position=(2.5, 2.8, 2.5), height=1.6)
+        for _ in range(45):
+            body.step(world, dt=1.0 / 60.0)
+        self.assertTrue(body.on_ground)
+        self.assertAlmostEqual(body.aabb.min_y, 1.0, delta=0.08)
+
+    def test_11_skydome_day_night_cycle_and_sync(self) -> None:
+        sky = SkyDome3D(time_of_day=0.25, day_speed=0.1)
+        light = DirectionalLight()
+        fog = Fog3D(enabled=True)
+        cam = Camera3D(position=(0.0, 5.0, 0.0), yaw=0.0, pitch=0.2)
+
+        pal_noon = sky.sync_lighting(light, fog)
+        self.assertGreater(float(pal_noon["day_factor"]), 0.8)
+        sky.draw(self.screen, cam)
+
+        sky.time_of_day = 0.75  # midnight
+        pal_night = sky.sync_lighting(light, fog)
+        self.assertGreater(float(pal_night["night_factor"]), 0.8)
+        sky.draw(self.screen, cam)
+
+        sky.update(0.5)
+        self.assertAlmostEqual(sky.time_of_day, 0.80, places=4)
+
+    def test_12_textured_zbuffer_renderer_and_clipping(self) -> None:
+        # Textured polygon near-plane clipping preserves valid UVs
+        poly_c = np.array([[-1.0, -1.0, -0.4], [-1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, -1.0, -0.4]], dtype=np.float32)
+        cp, cuv = clip_textured_polygon_near_plane(poly_c, CANONICAL_QUAD_UV, near_z=0.2)
+        self.assertGreaterEqual(len(cp), 3)
+        self.assertEqual(len(cp), len(cuv))
+        self.assertTrue(np.all(cp[:, 2] >= 0.1999))
+        self.assertTrue(np.all((cuv >= -1e-4) & (cuv <= 1.0001)))
+
+        # Z-buffer occlusion check: draw FAR red triangle AFTER NEAR blue triangle -> NEAR blue wins!
+        rast = SoftwareTexturedRasterizer(64, 64)
+        rast.begin_frame(clear_color=(0, 0, 0))
+        rast.draw_triangle((10.0, 10.0, 0.5), (50.0, 10.0, 0.5), (30.0, 50.0, 0.5), solid_color=(0, 0, 240))
+        rast.draw_triangle((10.0, 10.0, 0.2), (50.0, 10.0, 0.2), (30.0, 50.0, 0.2), solid_color=(240, 0, 0))
+        center_px = tuple(int(c) for c in rast.color_buf[25, 30])
+        self.assertEqual(center_px, (0, 0, 240))
+
+        # Full textured Renderer3D with ChunkedVoxelWorld + SkyDome3D + transparent glass + Mesh3D
+        tex_arr = np.zeros((16, 16, 3), dtype=np.uint8)
+        tex_arr[:, :] = (90, 175, 70)
+        tex_arr[::2, ::2] = (65, 140, 50)
+        tex_grass = Texture2D(tex_arr)
+        glass_rgba = np.full((16, 16, 4), (170, 225, 255, 95), dtype=np.uint8)
+        glass_rgba[0, :, 3] = 255
+        glass_rgba[-1, :, 3] = 255
+        glass_rgba[:, 0, 3] = 255
+        glass_rgba[:, -1, 3] = 255
+        tex_glass = Texture2D(glass_rgba)
+
+        grass_mat = VoxelMaterial(top_texture=tex_grass, side_texture=tex_grass, bottom_texture=tex_grass, name="Grass")
+        glass_mat = VoxelMaterial(top_texture=tex_glass, side_texture=tex_glass, bottom_texture=tex_glass, alpha=200, name="Glass")
+
+        world = ChunkedVoxelWorld(chunk_size=8)
+        for x in range(4):
+            for z in range(4):
+                world.set_block(x, 0, z, grass_mat)
+        world.set_block(2, 1, 2, glass_mat)
+
+        scene = Scene3D()
+        scene.add_mesh(Primitives.cube(size=0.8, color=(255, 199, 51), position=(1.0, 2.0, 2.0)))
+
+        cam = Camera3D(position=(2.0, 3.2, -3.5), yaw=0.0, pitch=-0.35, fov=72.0)
+        sky = SkyDome3D(time_of_day=0.25)
+        renderer = Renderer3D(800, 600, textured=True, render_scale=0.45, texture_lod_distance=20.0)
+        sky.sync_lighting(renderer.light, renderer.fog)
+
+        drawn = renderer.render_scene(self.screen, cam, scene=scene, voxel_world=world, sky_dome=sky)
+        self.assertGreater(drawn, 15)
 
 
 if __name__ == "__main__":
