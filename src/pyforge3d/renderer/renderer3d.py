@@ -449,60 +449,179 @@ class Renderer3D:
 
         n_dyn_lights, dyn_buf = self._pack_dynamic_lights(cam_pos, dynamic_lights)
 
-        # Prepare Scene3D Mesh3D polygons (supports both solid & textured Mesh3D!)
+        # Prepare Scene3D Mesh3D polygons with fast per-mesh frustum culling & scalar face math!
         mesh_polys: list[tuple] = []
         mesh_tr_polys: list[tuple] = []
-        n_dyn_lights, dyn_buf = self._pack_dynamic_lights(cam_pos, dynamic_lights)
         if scene is not None and scene.meshes:
+            cam_xf, cam_yf, cam_zf = float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])
+            vm00, vm01, vm02 = float(view_mat[0, 0]), float(view_mat[0, 1]), float(view_mat[0, 2])
+            vm10, vm11, vm12 = float(view_mat[1, 0]), float(view_mat[1, 1]), float(view_mat[1, 2])
+            vm20, vm21, vm22 = float(view_mat[2, 0]), float(view_mat[2, 1]), float(view_mat[2, 2])
+            tan_hx_m = half_w / max(1e-5, proj_scale) + 0.25
+            tan_hy_m = half_h / max(1e-5, proj_scale) + 0.25
+            sec_hx_m = math.sqrt(1.0 + tan_hx_m * tan_hx_m)
+            sec_hy_m = math.sqrt(1.0 + tan_hy_m * tan_hy_m)
+            near_safe = near_z * 0.5
+
             for mesh in scene.meshes:
                 if not mesh.visible or len(mesh.faces) == 0:
                     continue
+                # Fast bounding-sphere frustum check BEFORE world matrix vertex transform!
+                tr_m = mesh.transform
+                mdx = tr_m.x - cam_xf
+                mdy = tr_m.y - cam_yf
+                mdz = tr_m.z - cam_zf
+                m_rad = max(abs(tr_m.scale_x), abs(tr_m.scale_y), abs(tr_m.scale_z)) * 2.2
+                mcz = mdx * vm02 + mdy * vm12 + mdz * vm22
+                if mcz + m_rad < near_z or mcz - m_rad > far_z:
+                    continue
+                mcx = mdx * vm00 + mdy * vm10 + mdz * vm20
+                if abs(mcx) > mcz * tan_hx_m + m_rad * sec_hx_m:
+                    continue
+                mcy = mdx * vm01 + mdy * vm11 + mdz * vm21
+                if abs(mcy) > mcz * tan_hy_m + m_rad * sec_hy_m:
+                    continue
+
                 verts_w = mesh.get_world_vertices()
                 verts_c = (verts_w - cam_pos[None, :]) @ view_mat
+                if float(verts_c[:, 2].max()) < near_z or float(verts_c[:, 2].min()) > far_z:
+                    continue
+
                 mesh_alp = int(getattr(mesh, "alpha", 255))
                 face_textures = getattr(mesh, "face_textures", None)
                 face_uvs = getattr(mesh, "face_uvs", None)
+                do_bfc = mesh.backface_culling and not mesh.wireframe
+                vw_list = verts_w.tolist()
+                vc_list = verts_c.tolist()
+                fcols = mesh.face_colors
 
                 for f_idx, face in enumerate(mesh.faces):
-                    poly_w = verts_w[list(face)]
-                    center_w = poly_w.mean(axis=0)
-                    normal_w = compute_face_normals(poly_w[0], poly_w[1], poly_w[2])
-                    if mesh.backface_culling and not mesh.wireframe:
-                        if float(np.dot(normal_w, center_w - cam_pos)) >= 0.0:
-                            continue
+                    nf = len(face)
+                    if nf < 3:
+                        continue
+                    i0, i1, i2 = face[0], face[1], face[2]
+                    p0x, p0y, p0z = vw_list[i0]
+                    p1x, p1y, p1z = vw_list[i1]
+                    p2x, p2y, p2z = vw_list[i2]
+                    e1x, e1y, e1z = p1x - p0x, p1y - p0y, p1z - p0z
+                    e2x, e2y, e2z = p2x - p0x, p2y - p0y, p2z - p0z
+                    nx = e1y * e2z - e1z * e2y
+                    ny = e1z * e2x - e1x * e2z
+                    nz = e1x * e2y - e1y * e2x
+                    nlen = math.sqrt(nx * nx + ny * ny + nz * nz)
+                    if nlen > 1e-8:
+                        inv_n = 1.0 / nlen
+                        nx *= inv_n
+                        ny *= inv_n
+                        nz *= inv_n
+                    else:
+                        nx, ny, nz = 0.0, 1.0, 0.0
 
-                    poly_c = verts_c[list(face)]
-                    z_c = poly_c[:, 2]
-                    if float(np.max(z_c)) < near_z or float(np.min(z_c)) > far_z:
+                    # Scalar center in world space
+                    cw_x = cw_y = cw_z = 0.0
+                    for vi in face:
+                        vx_w, vy_w, vz_w = vw_list[vi]
+                        cw_x += vx_w
+                        cw_y += vy_w
+                        cw_z += vz_w
+                    inv_nf = 1.0 / nf
+                    cw_x *= inv_nf
+                    cw_y *= inv_nf
+                    cw_z *= inv_nf
+
+                    if do_bfc and (nx * (cw_x - cam_xf) + ny * (cw_y - cam_yf) + nz * (cw_z - cam_zf)) >= 0.0:
+                        continue
+
+                    min_zc = 1e30
+                    max_zc = -1e30
+                    cc_x = cc_y = cc_z = 0.0
+                    for vi in face:
+                        vx_c, vy_c, vz_c = vc_list[vi]
+                        if vz_c < min_zc:
+                            min_zc = vz_c
+                        if vz_c > max_zc:
+                            max_zc = vz_c
+                        cc_x += vx_c
+                        cc_y += vy_c
+                        cc_z += vz_c
+                    if max_zc < near_z or min_zc > far_z:
                         continue
 
                     f_tex = face_textures[f_idx] if face_textures is not None else None
                     f_uv = face_uvs[f_idx] if face_uvs is not None else None
-                    if f_tex is not None and f_uv is None and len(poly_c) == 4:
+                    if f_tex is not None and f_uv is None and nf == 4:
                         f_uv = CANONICAL_QUAD_UV
 
-                    if float(np.min(z_c)) < near_z:
+                    if min_zc < near_z:
+                        poly_c = verts_c[list(face)]
                         if f_tex is not None and f_uv is not None:
                             poly_c, f_uv = clip_textured_polygon_near_plane(poly_c, f_uv, near_z)
                         else:
                             poly_c = clip_polygon_near_plane(poly_c, near_z)
-                        if len(poly_c) < 3 or len(poly_c) > 8:
+                        nv_out = len(poly_c)
+                        if nv_out < 3 or nv_out > 8:
+                            continue
+                        d_val = float(np.linalg.norm(poly_c.mean(axis=0)))
+                        z_s = np.maximum(poly_c[:, 2], near_safe)
+                        iz_a = (1.0 / z_s).astype(np.float32)
+                        px_a = (half_w + poly_c[:, 0] * iz_a * proj_scale).astype(np.float32)
+                        py_a = (half_h - poly_c[:, 1] * iz_a * proj_scale).astype(np.float32)
+                    else:
+                        nv_out = nf
+                        cc_x *= inv_nf
+                        cc_y *= inv_nf
+                        cc_z *= inv_nf
+                        d_val = math.sqrt(cc_x * cc_x + cc_y * cc_y + cc_z * cc_z)
+                        px_l = [0.0] * nf
+                        py_l = [0.0] * nf
+                        iz_l = [0.0] * nf
+                        for k_i, vi in enumerate(face):
+                            vx_c, vy_c, vz_c = vc_list[vi]
+                            inv_z = 1.0 / (vz_c if vz_c > near_safe else near_safe)
+                            px_l[k_i] = half_w + vx_c * inv_z * proj_scale
+                            py_l[k_i] = half_h - vy_c * inv_z * proj_scale
+                            iz_l[k_i] = inv_z
+                        if max(px_l) < 0.0 or min(px_l) >= rw or max(py_l) < 0.0 or min(py_l) >= rh:
+                            continue
+                        px_a = np.asarray(px_l, dtype=np.float32)
+                        py_a = np.asarray(py_l, dtype=np.float32)
+                        iz_a = np.asarray(iz_l, dtype=np.float32)
+
+                    if min_zc < near_z:
+                        if float(px_a.max()) < 0.0 or float(px_a.min()) >= rw or float(py_a.max()) < 0.0 or float(py_a.min()) >= rh:
                             continue
 
-                    d_val = float(np.linalg.norm(poly_c.mean(axis=0)))
-                    z_s = np.maximum(poly_c[:, 2], near_z * 0.5)
-                    iz_a = (1.0 / z_s).astype(np.float32)
-                    px_a = (half_w + poly_c[:, 0] * iz_a * proj_scale).astype(np.float32)
-                    py_a = (half_h - poly_c[:, 1] * iz_a * proj_scale).astype(np.float32)
-                    if float(px_a.max()) < 0.0 or float(px_a.min()) >= rw or float(py_a.max()) < 0.0 or float(py_a.min()) >= rh:
-                        continue
+                    if light_type == 0:
+                        dot_l = nx * lx + ny * ly + nz * lz
+                        intensity = min(1.15, l_ambient + l_diffuse * (dot_l if dot_l > 0.0 else 0.0))
+                    else:
+                        dlx, dly, dlz = lx - cw_x, ly - cw_y, lz - cw_z
+                        dist2 = dlx * dlx + dly * dly + dlz * dlz
+                        dot_l = max(0.0, (nx * dlx + ny * dly + nz * dlz) / (math.sqrt(dist2) + 1e-6))
+                        intensity = min(1.2, l_ambient + l_diffuse * dot_l / (1.0 + l_atten * dist2))
 
-                    base_rgb = mesh.face_colors[f_idx]
-                    intensity = float(self.light.compute_intensities(normal_w, center_w)[0])
                     if n_dyn_lights > 0:
-                        intensity = min(1.45, intensity + self._sample_dynamic_lights_single(center_w, normal_w, n_dyn_lights, dyn_buf))
-                    fog_f_m = min(1.0, max(0.0, (d_val - fog_near) / fog_span)) if fog_enabled else 0.0
-                    shaded = self.fog.apply_to_colors(base_rgb * intensity, np.array([d_val], dtype=np.float32))
+                        for li in range(n_dyn_lights):
+                            dlx = float(dyn_buf[li, 0]) - cw_x
+                            dly = float(dyn_buf[li, 1]) - cw_y
+                            dlz = float(dyn_buf[li, 2]) - cw_z
+                            dist2 = dlx * dlx + dly * dly + dlz * dlz
+                            r2 = float(dyn_buf[li, 4])
+                            if dist2 >= r2:
+                                continue
+                            fall = 1.0 - dist2 / r2
+                            att = 1.0 / (1.0 + float(dyn_buf[li, 5]) * dist2)
+                            nd = max(0.0, (nx * dlx + ny * dly + nz * dlz) / (math.sqrt(dist2) + 1e-4))
+                            intensity += float(dyn_buf[li, 3]) * fall * att * (0.45 + 0.55 * nd)
+                        if intensity > 1.45:
+                            intensity = 1.45
+
+                    fog_f_m = min(1.0, max(0.0, (d_val - fog_near) * fog_inv_span)) if fog_enabled else 0.0
+                    sh_if = intensity * (1.0 - fog_f_m)
+                    br, bg, bb = float(fcols[f_idx, 0]), float(fcols[f_idx, 1]), float(fcols[f_idx, 2])
+                    sr_m = max(0, min(255, int(br * sh_if + fog_r * fog_f_m)))
+                    sg_m = max(0, min(255, int(bg * sh_if + fog_g * fog_f_m)))
+                    sb_m = max(0, min(255, int(bb * sh_if + fog_b * fog_f_m)))
 
                     if f_tex is not None and f_uv is not None:
                         tid_m = atlas.register(f_tex)
@@ -511,18 +630,18 @@ class Renderer3D:
                         is_tr_m = (mesh_alp < 255) or f_tex.has_cutout
                         entry_m = (
                             d_val,
-                            np.ascontiguousarray(px_a),
-                            np.ascontiguousarray(py_a),
-                            np.ascontiguousarray(iz_a),
+                            px_a,
+                            py_a,
+                            iz_a,
                             u_a,
                             v_a,
-                            len(poly_c),
+                            nv_out,
                             tid_m,
-                            max(0.25, min(1.25, intensity * 1.05)),
+                            max(0.25, min(1.35, intensity * 1.05)),
                             fog_f_m,
-                            int(shaded[0]),
-                            int(shaded[1]),
-                            int(shaded[2]),
+                            sr_m,
+                            sg_m,
+                            sb_m,
                             mesh_alp,
                         )
                         if is_tr_m:
@@ -532,18 +651,18 @@ class Renderer3D:
                     else:
                         entry_m = (
                             d_val,
-                            np.ascontiguousarray(px_a),
-                            np.ascontiguousarray(py_a),
-                            np.ascontiguousarray(iz_a),
+                            px_a,
+                            py_a,
+                            iz_a,
                             None,
                             None,
-                            len(poly_c),
+                            nv_out,
                             -1,
                             1.0,
                             0.0,
-                            int(shaded[0]),
-                            int(shaded[1]),
-                            int(shaded[2]),
+                            sr_m,
+                            sg_m,
+                            sb_m,
                             mesh_alp,
                         )
                         if mesh_alp < 255:
